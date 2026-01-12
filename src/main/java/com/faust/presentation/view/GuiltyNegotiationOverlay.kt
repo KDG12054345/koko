@@ -3,6 +3,8 @@ package com.faust.presentation.view
 import android.content.Context
 import android.graphics.PixelFormat
 import android.os.Build
+import android.provider.Settings
+import android.util.Log
 import android.view.*
 import android.widget.Button
 import android.widget.TextView
@@ -34,6 +36,10 @@ class GuiltyNegotiationOverlay(
     private var appName: String = ""
     private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
+    companion object {
+        private const val TAG = "GuiltyNegotiationOverlay"
+    }
+
     init {
         lifecycleRegistry.currentState = Lifecycle.State.INITIALIZED
     }
@@ -56,11 +62,20 @@ class GuiltyNegotiationOverlay(
             return // 이미 표시 중
         }
 
+        // 오버레이 권한 확인 (BadTokenException 방지)
+        if (!checkOverlayPermission()) {
+            Log.w(TAG, "Overlay permission not granted, cannot show overlay")
+            return
+        }
+
         lifecycleRegistry.currentState = Lifecycle.State.CREATED
         lifecycleRegistry.currentState = Lifecycle.State.STARTED
 
         val windowManager = context.getSystemService(Context.WINDOW_SERVICE) as? WindowManager
-            ?: return
+            ?: run {
+                Log.e(TAG, "WindowManager service not available")
+                return
+            }
         this.windowManager = windowManager
 
         overlayView = createOverlayView()
@@ -70,9 +85,22 @@ class GuiltyNegotiationOverlay(
                 windowManager.addView(view, params)
                 startCountdown()
             } catch (e: Exception) {
+                Log.e(TAG, "Failed to add overlay view", e)
                 // 오버레이 추가 실패
                 overlayView = null
             }
+        }
+    }
+
+    /**
+     * 오버레이 권한이 있는지 확인합니다.
+     * BadTokenException 방지를 위해 필수입니다.
+     */
+    private fun checkOverlayPermission(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Settings.canDrawOverlays(context)
+        } else {
+            true
         }
     }
 
@@ -80,7 +108,11 @@ class GuiltyNegotiationOverlay(
         countdownJob?.cancel()
         coroutineScope.cancel()
         overlayView?.let { view ->
-            windowManager?.removeView(view)
+            try {
+                windowManager?.removeView(view)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to remove overlay view", e)
+            }
         }
         overlayView = null
         windowManager = null

@@ -122,10 +122,12 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 차단 앱 목록 관찰
+        // 차단 앱 목록 관찰 (adapter가 초기화된 후에만 실행)
         lifecycleScope.launch {
             viewModel.blockedApps.collect { apps ->
-                adapter.submitList(apps)
+                if (::adapter.isInitialized) {
+                    adapter.submitList(apps)
+                }
             }
         }
     }
