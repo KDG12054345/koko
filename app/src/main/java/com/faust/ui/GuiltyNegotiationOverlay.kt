@@ -1,6 +1,5 @@
 package com.faust.ui
 
-import android.app.Activity
 import android.content.Context
 import android.graphics.PixelFormat
 import android.os.Build
@@ -19,15 +18,19 @@ class GuiltyNegotiationOverlay(
 ) : LifecycleOwner {
     private var windowManager: WindowManager? = null
     private var overlayView: View? = null
-    private val lifecycleRegistry = LifecycleRegistry(this)
+    private val lifecycleRegistry: LifecycleRegistry = LifecycleRegistry(this)
     private var countdownJob: Job? = null
     private val penaltyService = PenaltyService(context)
     private var packageName: String = ""
     private var appName: String = ""
+    private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     init {
         lifecycleRegistry.currentState = Lifecycle.State.INITIALIZED
     }
+
+    override val lifecycle: Lifecycle
+        get() = lifecycleRegistry
 
     fun show(packageName: String, appName: String) {
         this.packageName = packageName
@@ -59,6 +62,7 @@ class GuiltyNegotiationOverlay(
 
     fun dismiss() {
         countdownJob?.cancel()
+        coroutineScope.cancel()
         overlayView?.let { view ->
             windowManager?.removeView(view)
         }
@@ -96,7 +100,7 @@ class GuiltyNegotiationOverlay(
 
     private fun startCountdown(countdownText: TextView? = null) {
         countdownJob?.cancel()
-        countdownJob = CoroutineScope(Dispatchers.Main).launch {
+        countdownJob = coroutineScope.launch {
             var remainingSeconds = 30
             val textView = countdownText ?: overlayView?.findViewById(R.id.textCountdown)
 
@@ -145,6 +149,4 @@ class GuiltyNegotiationOverlay(
             gravity = Gravity.CENTER
         }
     }
-
-    override fun getLifecycle(): Lifecycle = lifecycleRegistry
 }

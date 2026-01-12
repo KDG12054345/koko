@@ -11,8 +11,10 @@ import androidx.recyclerview.widget.ListAdapter
 import androidx.recyclerview.widget.RecyclerView
 import com.faust.R
 import com.faust.models.BlockedApp
+import com.google.android.material.button.MaterialButton
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -34,10 +36,13 @@ class BlockedAppAdapter(
         private val appIcon: ImageView = itemView.findViewById(R.id.imageAppIcon)
         private val appName: TextView = itemView.findViewById(R.id.textAppName)
         private val packageName: TextView = itemView.findViewById(R.id.textPackageName)
-        private val removeButton: com.google.android.material.button.MaterialButton =
-            itemView.findViewById(R.id.buttonRemove)
+        private val removeButton: MaterialButton = itemView.findViewById(R.id.buttonRemove)
+        private var iconLoadJob: Job? = null
 
         fun bind(blockedApp: BlockedApp) {
+            // 이전 아이콘 로드 작업 취소
+            iconLoadJob?.cancel()
+            
             appName.text = blockedApp.appName
             packageName.text = blockedApp.packageName
 
@@ -50,19 +55,24 @@ class BlockedAppAdapter(
         }
 
         private fun loadAppIcon(packageName: String) {
-            CoroutineScope(Dispatchers.IO).launch {
+            iconLoadJob = CoroutineScope(Dispatchers.IO).launch {
                 try {
                     val pm = itemView.context.packageManager
                     val appInfo = pm.getApplicationInfo(packageName, 0)
                     val icon: Drawable = pm.getApplicationIcon(appInfo)
 
                     withContext(Dispatchers.Main) {
-                        appIcon.setImageDrawable(icon)
+                        // ViewHolder가 재사용되지 않았는지 확인
+                        if (this@ViewHolder.adapterPosition != RecyclerView.NO_POSITION) {
+                            appIcon.setImageDrawable(icon)
+                        }
                     }
                 } catch (e: Exception) {
                     // 아이콘 로드 실패 시 기본 아이콘 사용
                     withContext(Dispatchers.Main) {
-                        appIcon.setImageResource(android.R.drawable.sym_def_app_icon)
+                        if (this@ViewHolder.adapterPosition != RecyclerView.NO_POSITION) {
+                            appIcon.setImageResource(android.R.drawable.sym_def_app_icon)
+                        }
                     }
                 }
             }

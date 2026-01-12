@@ -26,4 +26,7 @@
     <string name="notification_channel_point_mining">포인트 채굴</string>
     <string name="notification_app_blocking_title">앱 차단 활성화</string>
     <string name="notification_point_mining_title">포인트 채굴 중</string>
+    
+    <!-- 접근성 서비스 -->
+    <string name="accessibility_service_description">앱 실행을 감지하여 차단된 앱을 모니터링합니다.</string>
 </resources>

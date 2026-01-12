@@ -11,11 +11,11 @@ import android.view.ViewGroup
 import android.widget.TextView
 import androidx.appcompat.app.AlertDialog
 import androidx.fragment.app.DialogFragment
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.faust.R
 import com.faust.models.BlockedApp
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -27,15 +27,18 @@ class AppSelectionDialog(
     private lateinit var appListAdapter: InstalledAppAdapter
 
     override fun onCreateDialog(savedInstanceState: Bundle?): Dialog {
+        // 어댑터를 먼저 초기화
+        appListAdapter = InstalledAppAdapter { app ->
+            onAppSelected(app)
+            dismiss()
+        }
+
         val recyclerView = RecyclerView(requireContext()).apply {
             layoutManager = LinearLayoutManager(context)
-            appListAdapter = InstalledAppAdapter { app ->
-                onAppSelected(app)
-                dismiss()
-            }
             adapter = appListAdapter
         }
 
+        // 어댑터 초기화 후 앱 목록 로드
         loadInstalledApps()
 
         return AlertDialog.Builder(requireContext())
@@ -46,21 +49,20 @@ class AppSelectionDialog(
     }
 
     private fun loadInstalledApps() {
-        CoroutineScope(Dispatchers.IO).launch {
-            val pm = requireContext().packageManager
-            val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 } // 시스템 앱 제외
-                .map {
-                    BlockedApp(
-                        packageName = it.packageName,
-                        appName = pm.getApplicationLabel(it).toString()
-                    )
-                }
-                .sortedBy { it.appName }
-
-            withContext(Dispatchers.Main) {
-                appListAdapter.submitList(apps)
+        lifecycleScope.launch {
+            val apps = withContext(Dispatchers.IO) {
+                val pm = requireContext().packageManager
+                pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                    .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 } // 시스템 앱 제외
+                    .map {
+                        BlockedApp(
+                            packageName = it.packageName,
+                            appName = pm.getApplicationLabel(it).toString()
+                        )
+                    }
+                    .sortedBy { it.appName }
             }
+            appListAdapter.submitList(apps)
         }
     }
 }

@@ -53,13 +53,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private val usageStatsPermissionLauncher = registerForActivityResult(
+    private val accessibilityPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (checkUsageStatsPermission()) {
+        if (checkAccessibilityService()) {
             startServices()
         } else {
-            Toast.makeText(this, "사용 통계 권한이 필요합니다", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "접근성 서비스 권한이 필요합니다", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -204,17 +204,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkAllPermissions(): Boolean {
-        return checkUsageStatsPermission() && checkOverlayPermission()
+        return checkAccessibilityService() && checkOverlayPermission()
     }
 
-    private fun checkUsageStatsPermission(): Boolean {
-        val appOpsManager = getSystemService(android.app.AppOpsManager::class.java)
-        val mode = appOpsManager?.checkOpNoThrow(
-            android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
-            android.os.Process.myUid(),
-            packageName
-        )
-        return mode == android.app.AppOpsManager.MODE_ALLOWED
+    private fun checkAccessibilityService(): Boolean {
+        return AppBlockingService.isServiceEnabled(this)
     }
 
     private fun checkOverlayPermission(): Boolean {
@@ -229,7 +223,7 @@ class MainActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("권한 필요")
             .setMessage("앱 차단 기능을 사용하려면 다음 권한이 필요합니다:\n\n" +
-                    "1. 사용 통계 권한\n" +
+                    "1. 접근성 서비스 권한\n" +
                     "2. 다른 앱 위에 표시 권한")
             .setPositiveButton("설정") { _, _ ->
                 requestPermissions()
@@ -239,9 +233,9 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestPermissions() {
-        if (!checkUsageStatsPermission()) {
-            val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
-            usageStatsPermissionLauncher.launch(intent)
+        if (!checkAccessibilityService()) {
+            AppBlockingService.requestAccessibilityPermission(this)
+            // 접근성 설정 화면에서 돌아올 때 체크하기 위해 onResume에서 확인
         } else if (!checkOverlayPermission()) {
             val intent = Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -253,11 +247,20 @@ class MainActivity : AppCompatActivity() {
 
     private fun startServices() {
         if (checkAllPermissions()) {
-            AppBlockingService.startService(this)
+            // 접근성 서비스는 시스템이 자동으로 시작하므로 별도 시작 불필요
             PointMiningService.startService(this)
             Toast.makeText(this, "서비스 시작됨", Toast.LENGTH_SHORT).show()
         } else {
             Toast.makeText(this, "모든 권한이 필요합니다", Toast.LENGTH_SHORT).show()
+        }
+    }
+    
+    override fun onResume() {
+        super.onResume()
+        // 접근성 서비스 권한이 활성화되었는지 확인
+        if (checkAccessibilityService() && checkOverlayPermission()) {
+            // 모든 권한이 활성화되었으면 서비스 시작
+            PointMiningService.startService(this)
         }
     }
 }
