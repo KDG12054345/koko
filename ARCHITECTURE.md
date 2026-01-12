@@ -10,6 +10,8 @@
 7. [데이터베이스 스키마](#데이터베이스-스키마)
 8. [성능 최적화](#성능-최적화)
 9. [데이터 정합성](#데이터-정합성)
+10. [시스템 진입점](#시스템-진입점-system-entry-points)
+11. [핵심 이벤트 정의](#핵심-이벤트-정의-core-event-definitions)
 
 ---
 
@@ -49,11 +51,17 @@ Faust는 **계층형 아키텍처(Layered Architecture)**를 기반으로 하며
 - **Business Logic Layer**: 비즈니스 규칙 및 페널티 로직
 - **Data Layer**: 데이터 영속성 및 저장소
 
-### 2. Repository 패턴 (암묵적)
+### 2. MVVM 패턴 (Model-View-ViewModel)
+- **View**: `MainActivity` - UI 렌더링 및 사용자 인터랙션
+- **ViewModel**: `MainViewModel` - 데이터 관찰 및 비즈니스 로직
+- **Model**: `FaustDatabase`, `PreferenceManager` - 데이터 소스
+- StateFlow를 통한 반응형 UI 업데이트
+
+### 3. Repository 패턴 (암묵적)
 - DAO를 통한 데이터 접근 추상화
 - PreferenceManager를 통한 설정 데이터 관리
 
-### 3. Service-Oriented Architecture
+### 4. Service-Oriented Architecture
 - 독립적인 Foreground Service들
 - 서비스 간 느슨한 결합
 
@@ -66,40 +74,45 @@ Faust는 **계층형 아키텍처(Layered Architecture)**를 기반으로 하며
 ```
 com.faust/
 │
-├── 📱 Presentation Layer (UI)
-│   ├── MainActivity.kt                    # 메인 액티비티
-│   └── ui/
-│       ├── GuiltyNegotiationOverlay.kt     # 유죄 협상 오버레이
-│       ├── BlockedAppAdapter.kt            # 차단 앱 리스트 어댑터
-│       └── AppSelectionDialog.kt           # 앱 선택 다이얼로그
+├── 📱 Presentation Layer
+│   └── presentation/
+│       ├── view/
+│       │   ├── MainActivity.kt                    # 메인 액티비티
+│       │   ├── GuiltyNegotiationOverlay.kt        # 유죄 협상 오버레이
+│       │   ├── BlockedAppAdapter.kt                # 차단 앱 리스트 어댑터
+│       │   └── AppSelectionDialog.kt              # 앱 선택 다이얼로그
+│       └── viewmodel/
+│           └── MainViewModel.kt                  # 메인 ViewModel (MVVM)
 │
 ├── ⚙️ Service Layer
 │   └── services/
-│       ├── AppBlockingService.kt           # 앱 차단 모니터링 서비스
-│       └── PointMiningService.kt           # 포인트 채굴 서비스
+│       ├── AppBlockingService.kt                  # 앱 차단 모니터링 서비스
+│       └── PointMiningService.kt                  # 포인트 채굴 서비스
 │
-├── 🧠 Business Logic Layer
-│   └── services/
-│       ├── PenaltyService.kt               # 페널티 계산 및 적용
-│       └── WeeklyResetService.kt           # 주간 정산 로직
+├── 🧠 Business Logic Layer (Domain)
+│   └── domain/
+│       ├── PenaltyService.kt                      # 페널티 계산 및 적용
+│       └── WeeklyResetService.kt                 # 주간 정산 로직
 │
 ├── 💾 Data Layer
-│   ├── database/
-│   │   ├── FaustDatabase.kt                # Room 데이터베이스
-│   │   ├── AppBlockDao.kt                   # 차단 앱 DAO
-│   │   └── PointTransactionDao.kt          # 포인트 거래 DAO
-│   │
-│   ├── models/
-│   │   ├── BlockedApp.kt                   # 차단 앱 엔티티
-│   │   ├── PointTransaction.kt              # 포인트 거래 엔티티
-│   │   └── UserTier.kt                      # 사용자 티어 enum
-│   │
-│   └── utils/
-│       ├── PreferenceManager.kt             # SharedPreferences 관리
-│       └── TimeUtils.kt                     # 시간 계산 유틸리티
+│   └── data/
+│       ├── database/
+│       │   ├── FaustDatabase.kt                  # Room 데이터베이스
+│       │   ├── AppBlockDao.kt                     # 차단 앱 DAO
+│       │   └── PointTransactionDao.kt             # 포인트 거래 DAO
+│       │
+│       └── utils/
+│           ├── PreferenceManager.kt               # EncryptedSharedPreferences 관리
+│           └── TimeUtils.kt                       # 시간 계산 유틸리티
+│
+├── 📦 Models
+│   └── models/
+│       ├── BlockedApp.kt                          # 차단 앱 엔티티
+│       ├── PointTransaction.kt                    # 포인트 거래 엔티티
+│       └── UserTier.kt                            # 사용자 티어 enum
 │
 └── 🚀 Application
-    └── FaustApplication.kt                  # Application 클래스
+    └── FaustApplication.kt                        # Application 클래스
 ```
 
 ---
@@ -222,14 +235,28 @@ sequenceDiagram
 ### 1. Presentation Layer
 
 #### MainActivity
-- **책임**: 메인 UI 표시 및 사용자 인터랙션 처리
+- **책임**: 메인 UI 표시 및 사용자 인터랙션 처리, 권한 요청
 - **의존성**: 
-  - `FaustDatabase` (차단 앱 목록 조회, 포인트 Flow 관찰)
-  - `PreferenceManager` (사용자 티어, 채굴 시간 등)
+  - `MainViewModel` (데이터 관찰 및 비즈니스 로직)
   - `AppBlockingService`, `PointMiningService` (서비스 제어)
 - **UI 업데이트**: 
-  - 포인트: `PointTransactionDao.getTotalPointsFlow()`를 구독하여 변경사항만 감지
-  - 차단 앱 목록: `AppBlockDao.getAllBlockedApps()` Flow 구독
+  - ViewModel의 StateFlow를 관찰하여 UI 자동 업데이트
+  - 포인트: `viewModel.currentPoints` StateFlow 구독
+  - 차단 앱 목록: `viewModel.blockedApps` StateFlow 구독
+- **경량화**: 데이터베이스 직접 접근 제거, ViewModel을 통한 간접 접근
+
+#### MainViewModel
+- **책임**: 데이터 관찰 및 비즈니스 로직 처리
+- **의존성**:
+  - `FaustDatabase` (데이터 소스)
+  - `PreferenceManager` (설정 데이터)
+- **StateFlow 관리**:
+  - `currentPoints: StateFlow<Int>` - 포인트 합계
+  - `blockedApps: StateFlow<List<BlockedApp>>` - 차단 앱 목록
+- **주요 메서드**:
+  - `addBlockedApp()`: 차단 앱 추가
+  - `removeBlockedApp()`: 차단 앱 제거
+  - `getMaxBlockedApps()`: 티어별 최대 앱 개수 반환
 
 #### GuiltyNegotiationOverlay
 - **책임**: 시스템 오버레이로 유죄 협상 화면 표시
@@ -264,6 +291,9 @@ sequenceDiagram
   - `database.withTransaction`으로 포인트 적립과 거래 내역 저장을 원자적으로 처리
   - DB에서 현재 포인트 계산 (`PointTransactionDao.getTotalPoints()`)
   - PreferenceManager는 호환성을 위해 동기화만 수행
+- **에러 처리**:
+  - 트랜잭션 내부 예외 처리 및 로깅
+  - 실패 시 자동 롤백
 
 ### 3. Business Logic Layer
 
@@ -276,6 +306,9 @@ sequenceDiagram
   - `database.withTransaction`으로 포인트 차감과 거래 내역 저장을 원자적으로 처리
   - DB에서 현재 포인트 계산 (`PointTransactionDao.getTotalPoints()`)
   - PreferenceManager는 호환성을 위해 동기화만 수행
+- **에러 처리**:
+  - 트랜잭션 내부 예외 처리 및 로깅
+  - 실패 시 자동 롤백
 
 #### WeeklyResetService
 - **책임**: 주간 정산 로직
@@ -284,6 +317,9 @@ sequenceDiagram
   - `database.withTransaction`으로 포인트 조정과 거래 내역 저장을 원자적으로 처리
   - DB에서 현재 포인트 계산 (`PointTransactionDao.getTotalPoints()`)
   - PreferenceManager는 호환성을 위해 동기화만 수행
+- **에러 처리**:
+  - 트랜잭션 내부 예외 처리 및 로깅
+  - 실패 시 자동 롤백 및 재시도 스케줄링
 
 ### 4. Data Layer
 
@@ -309,9 +345,15 @@ sequenceDiagram
   - 마지막 채굴 시간/앱
   - 마지막 정산 시간
   - 서비스 실행 상태
+- **보안**:
+  - `EncryptedSharedPreferences` 사용 (AES256-GCM 암호화)
+  - 포인트 조작 방지
+  - MasterKey 기반 키 관리
+  - 암호화 실패 시 일반 SharedPreferences로 폴백 (로그 기록)
 - **역할**: 
   - 포인트는 DB가 단일 소스 (PointTransaction의 SUM)
   - PreferenceManager는 호환성 및 기타 설정 데이터 관리
+  - 모든 데이터 접근에 예외 처리 및 로깅
 
 ---
 
@@ -423,18 +465,26 @@ erDiagram
 | timestamp | Long | NOT NULL | 거래 시간 |
 | reason | String | | 거래 사유 |
 
-### SharedPreferences 스키마
+### EncryptedSharedPreferences 스키마
 
-**파일명**: `faust_prefs.xml`
+**파일명**: `faust_prefs.xml` (암호화됨)
+
+**암호화 방식**: AES256-GCM (키 및 값 모두 암호화)
 
 | 키 | 타입 | 기본값 | 설명 |
 |---|------|--------|------|
 | user_tier | String | "FREE" | 사용자 티어 |
-| current_points | Int | 0 | 현재 보유 포인트 |
+| current_points | Int | 0 | 현재 보유 포인트 (호환성, DB와 동기화) |
 | last_mining_time | Long | 0 | 마지막 채굴 시간 |
 | last_mining_app | String | null | 마지막 채굴 앱 패키지명 |
 | last_reset_time | Long | 0 | 마지막 정산 시간 |
 | is_service_running | Boolean | false | 서비스 실행 상태 |
+
+**보안 특징**:
+- MasterKey 기반 키 관리
+- AES256-SIV (키 암호화) + AES256-GCM (값 암호화)
+- 포인트 조작 방지
+- 암호화 실패 시 일반 SharedPreferences로 폴백 (로그 기록)
 
 ---
 
@@ -442,11 +492,14 @@ erDiagram
 
 ```
 MainActivity
-  ├─► FaustDatabase
-  ├─► PreferenceManager
+  ├─► MainViewModel
   ├─► AppBlockingService
   ├─► PointMiningService
   └─► WeeklyResetService
+
+MainViewModel
+  ├─► FaustDatabase
+  └─► PreferenceManager
 
 AppBlockingService
   ├─► FaustDatabase
@@ -474,9 +527,13 @@ WeeklyResetService
 
 ### 읽기 흐름 (Read Flow)
 ```
-UI Component
+UI Component (MainActivity)
+    ↓
+ViewModel (MainViewModel)
     ↓
 Database Flow (getTotalPointsFlow, getAllBlockedApps)
+    ↓
+ViewModel StateFlow 업데이트
     ↓
 UI Update (Reactive)
 ```
@@ -491,11 +548,13 @@ PointTransaction 삽입
     ↓
 현재 포인트 계산 (SUM)
     ↓
-PreferenceManager 동기화 (호환성)
+PreferenceManager 동기화 (호환성, 암호화 저장)
     ↓
-트랜잭션 커밋
+트랜잭션 커밋 (예외 처리 및 롤백 보장)
     ↓
-Flow 자동 업데이트
+Database Flow 자동 업데이트
+    ↓
+ViewModel StateFlow 업데이트
     ↓
 UI 반응형 업데이트
 ```
@@ -509,6 +568,14 @@ UI 반응형 업데이트
 2. **SYSTEM_ALERT_WINDOW**: 오버레이 표시
 3. **FOREGROUND_SERVICE**: 백그라운드 서비스 실행 (PointMiningService용)
 4. **QUERY_ALL_PACKAGES**: 설치된 앱 목록 조회
+
+### 보안 강화
+1. **EncryptedSharedPreferences**: 포인트 데이터 암호화 저장
+   - AES256-GCM 암호화
+   - MasterKey 기반 키 관리
+   - 포인트 조작 방지
+2. **트랜잭션 예외 처리**: 모든 DB 트랜잭션에 예외 처리 및 롤백 보장
+3. **동시성 보장**: 모든 포인트 수정 로직이 트랜잭션으로 처리되어 동시 접근 시 데이터 무결성 보장
 
 ### 권한 요청 플로우
 ```
@@ -536,10 +603,10 @@ MainActivity
 ## 확장성 고려사항
 
 ### 향후 추가 가능한 레이어
-1. **ViewModel Layer**: MVVM 패턴 완전 적용
-2. **Repository Layer**: 데이터 소스 추상화
-3. **UseCase Layer**: 비즈니스 로직 캡슐화
-4. **Dependency Injection**: Dagger/Hilt 도입
+1. **Repository Layer**: 데이터 소스 추상화
+2. **UseCase Layer**: 비즈니스 로직 캡슐화
+3. **Dependency Injection**: Dagger/Hilt 도입
+4. **추가 ViewModel**: 다른 화면에 대한 ViewModel 확장
 
 ### 확장 포인트
 - Standard/Faust Pro 티어 로직
@@ -577,9 +644,10 @@ MainActivity
 #### MainActivity UI 최적화
 - **이전**: `while(true)` 루프로 5초마다 포인트 업데이트
 - **현재**: 
-  - `PointTransactionDao.getTotalPointsFlow()` 구독
-  - 포인트 변경 시에만 UI 업데이트
-- **효과**: 배터리 효율 향상, 불필요한 UI 갱신 제거
+  - `MainViewModel`의 StateFlow를 관찰
+  - 포인트 및 차단 앱 목록 변경 시에만 UI 업데이트
+  - 데이터베이스 직접 접근 제거로 경량화
+- **효과**: 배터리 효율 향상, 불필요한 UI 갱신 제거, 코드 분리로 유지보수성 향상
 
 ### 개선 가능 영역
 - 데이터베이스 인덱싱
@@ -602,34 +670,70 @@ MainActivity
 
 1. **PenaltyService**
    ```kotlin
-   database.withTransaction {
-       val currentPoints = database.pointTransactionDao().getTotalPoints() ?: 0
-       val actualPenalty = penalty.coerceAtMost(currentPoints)
-       if (actualPenalty > 0) {
-           database.pointTransactionDao().insertTransaction(...)
-           preferenceManager.setCurrentPoints(...) // 동기화
+   try {
+       database.withTransaction {
+           try {
+               val currentPoints = database.pointTransactionDao().getTotalPoints() ?: 0
+               val actualPenalty = penalty.coerceAtMost(currentPoints)
+               if (actualPenalty > 0) {
+                   database.pointTransactionDao().insertTransaction(...)
+                   preferenceManager.setCurrentPoints(...) // 동기화
+               }
+           } catch (e: Exception) {
+               Log.e(TAG, "Error in transaction", e)
+               throw e // 롤백을 위해 예외 재발생
+           }
        }
+   } catch (e: Exception) {
+       Log.e(TAG, "Transaction failed", e)
+       // 자동 롤백됨
    }
    ```
 
 2. **PointMiningService**
    ```kotlin
-   database.withTransaction {
-       database.pointTransactionDao().insertTransaction(...)
-       val currentPoints = database.pointTransactionDao().getTotalPoints() ?: 0
-       preferenceManager.setCurrentPoints(currentPoints) // 동기화
+   try {
+       database.withTransaction {
+           try {
+               database.pointTransactionDao().insertTransaction(...)
+               val currentPoints = database.pointTransactionDao().getTotalPoints() ?: 0
+               preferenceManager.setCurrentPoints(currentPoints) // 동기화
+           } catch (e: Exception) {
+               Log.e(TAG, "Error in transaction", e)
+               throw e // 롤백을 위해 예외 재발생
+           }
+       }
+   } catch (e: Exception) {
+       Log.e(TAG, "Transaction failed", e)
+       // 자동 롤백됨
    }
    ```
 
 3. **WeeklyResetService**
    ```kotlin
-   database.withTransaction {
-       val currentPoints = database.pointTransactionDao().getTotalPoints() ?: 0
-       // 정산 로직...
-       database.pointTransactionDao().insertTransaction(...)
-       preferenceManager.setCurrentPoints(...) // 동기화
+   try {
+       database.withTransaction {
+           try {
+               val currentPoints = database.pointTransactionDao().getTotalPoints() ?: 0
+               // 정산 로직...
+               database.pointTransactionDao().insertTransaction(...)
+               preferenceManager.setCurrentPoints(...) // 동기화
+           } catch (e: Exception) {
+               Log.e(TAG, "Error in transaction", e)
+               throw e // 롤백을 위해 예외 재발생
+           }
+       }
+   } catch (e: Exception) {
+       Log.e(TAG, "Transaction failed", e)
+       // 자동 롤백됨
    }
    ```
+
+**에러 처리 특징**:
+- 모든 트랜잭션에 이중 예외 처리 (내부/외부)
+- 실패 시 자동 롤백 보장
+- 상세한 에러 로깅
+- 동시성 보장 (모든 포인트 수정이 트랜잭션으로 처리)
 
 #### 데이터 흐름
 
@@ -656,6 +760,330 @@ UI 반응형 업데이트
 - **단일 소스**: DB가 포인트의 단일 소스
 - **호환성**: PreferenceManager는 동기화만 수행하여 기존 코드와 호환
 - **반응형**: Flow로 자동 UI 업데이트
+- **안정성**: 예외 처리 및 롤백으로 데이터 무결성 보장
+- **보안**: EncryptedSharedPreferences로 포인트 조작 방지
+- **동시성**: 모든 포인트 수정이 트랜잭션으로 처리되어 동시 접근 시 데이터 꼬임 방지
+
+---
+
+## 시스템 진입점 (System Entry Points)
+
+시스템 진입점은 앱이 외부 자극이나 사용자 액션에 의해 활성화되는 지점입니다. 각 진입점은 특정 트리거 조건에 따라 시스템의 특정 컴포넌트를 활성화합니다.
+
+### 1. 사용자 진입점 (MainActivity)
+
+**파일**: [`app/src/main/java/com/faust/presentation/view/MainActivity.kt`](app/src/main/java/com/faust/presentation/view/MainActivity.kt)
+
+**역할**: 사용자가 앱 아이콘을 눌러 실행하는 지점으로, 차단 앱 설정 및 포인트 현황을 확인하는 UI 레이어의 시작점입니다.
+
+**트리거 조건**:
+- 사용자가 홈 화면 또는 앱 목록에서 Faust 앱 아이콘 클릭
+- `AndroidManifest.xml`의 `MAIN`/`LAUNCHER` intent-filter에 의해 시스템이 Activity 시작
+
+**주요 책임**:
+- UI 초기화 및 레이아웃 설정
+- 권한 확인 및 요청 (접근성 서비스, 오버레이 권한)
+- ViewModel StateFlow 관찰 및 UI 업데이트
+- 서비스 시작 제어 (PointMiningService)
+
+**MVVM 패턴**:
+- ViewModel(`MainViewModel`)을 통한 데이터 관찰
+- 데이터베이스 직접 접근 제거 (경량화)
+- UI 렌더링과 권한 요청에만 집중
+
+**생명주기**:
+```
+사용자 앱 아이콘 클릭
+  ↓
+MainActivity.onCreate()
+  ↓
+ViewModel 초기화 및 StateFlow 관찰 시작
+  ↓
+권한 확인 → 서비스 시작
+  ↓
+UI 초기화 완료
+```
+
+### 2. 시스템 이벤트 진입점 (AppBlockingService)
+
+**파일**: [`app/src/main/java/com/faust/services/AppBlockingService.kt`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+
+**역할**: 안드로이드 시스템으로부터 앱 실행 상태 변화 신호를 받는 지점입니다. 현재 `AccessibilityService`를 상속받아 `onAccessibilityEvent`를 통해 시스템 이벤트를 직접 수신합니다.
+
+**트리거 조건**:
+- 사용자가 접근성 서비스 설정에서 Faust 서비스 활성화
+- 시스템이 `onServiceConnected()` 콜백 호출
+- 앱 실행 시 `TYPE_WINDOW_STATE_CHANGED` 이벤트 발생
+
+**주요 책임**:
+- 차단된 앱 목록 메모리 캐싱 (HashSet)
+- 앱 실행 이벤트 실시간 감지
+- 차단된 앱 감지 시 오버레이 트리거
+- 데이터베이스 변경사항 Flow 구독
+
+**생명주기**:
+```
+접근성 서비스 활성화
+  ↓
+onServiceConnected()
+  ↓
+차단 앱 목록 초기 로드 및 캐싱
+  ↓
+이벤트 기반 감지 시작 (TYPE_WINDOW_STATE_CHANGED)
+```
+
+### 3. 백그라운드 유지 진입점 (PointMiningService)
+
+**파일**: [`app/src/main/java/com/faust/services/PointMiningService.kt`](app/src/main/java/com/faust/services/PointMiningService.kt)
+
+**역할**: Foreground Service로 실행되어 앱이 꺼져 있어도 포인트 채굴 로직이 지속되도록 보장하는 지점입니다.
+
+**트리거 조건**:
+- `MainActivity.startServices()` 호출
+- `PointMiningService.startService(context)` 호출
+- 시스템이 Foreground Service로 시작
+
+**주요 책임**:
+- 1분마다 포그라운드 앱 확인
+- 차단되지 않은 앱 사용 시간 추적
+- 포인트 자동 적립 (10분당 1 WP, Free 티어는 0.5x)
+- 포인트 거래 내역 저장 (트랜잭션 보장)
+
+**생명주기**:
+```
+MainActivity.startServices()
+  ↓
+onStartCommand()
+  ↓
+Foreground Service 시작 (Notification 표시)
+  ↓
+1분마다 포인트 채굴 루프 실행
+```
+
+### 4. 시간 기반 진입점 (WeeklyResetReceiver)
+
+**파일**: [`app/src/main/java/com/faust/domain/WeeklyResetService.kt`](app/src/main/java/com/faust/domain/WeeklyResetService.kt)
+
+**역할**: `AlarmManager`에 의해 매주 월요일 00:00에 시스템이 브로드캐스트를 던져 정산 로직을 실행시키는 지점입니다.
+
+**트리거 조건**:
+- `AlarmManager`가 설정된 시간(매주 월요일 00:00)에 도달
+- 시스템이 `WeeklyResetReceiver.onReceive()` 호출
+- Intent action: `"com.faust.WEEKLY_RESET"`
+
+**주요 책임**:
+- 주간 정산 로직 실행 (`WeeklyResetService.performReset()`)
+- 포인트 몰수 처리 (100 WP 초과 시 초과분 몰수, 이하 시 전액 몰수)
+- 다음 주 정산 스케줄링
+
+**생명주기**:
+```
+AlarmManager 트리거 (월요일 00:00)
+  ↓
+WeeklyResetReceiver.onReceive()
+  ↓
+WeeklyResetService.performReset()
+  ↓
+트랜잭션으로 포인트 조정
+  ↓
+다음 주 정산 스케줄링
+```
+
+### 5. 부팅 진입점 (WeeklyResetReceiver)
+
+**파일**: [`app/src/main/java/com/faust/domain/WeeklyResetService.kt`](app/src/main/java/com/faust/domain/WeeklyResetService.kt)
+
+**역할**: 기기 재부팅 시 `ACTION_BOOT_COMPLETED` 이벤트를 수신하여 중단된 서비스와 알람을 재등록하는 지점입니다.
+
+**트리거 조건**:
+- 기기 재부팅 완료
+- 시스템이 `ACTION_BOOT_COMPLETED` 브로드캐스트 전송
+- `AndroidManifest.xml`의 `BOOT_COMPLETED` intent-filter에 의해 수신
+
+**주요 책임**:
+- 주간 정산 알람 재등록 (`scheduleWeeklyReset()`)
+- 서비스 재시작 (필요 시)
+
+**생명주기**:
+```
+기기 재부팅 완료
+  ↓
+ACTION_BOOT_COMPLETED 브로드캐스트
+  ↓
+WeeklyResetReceiver.onReceive()
+  ↓
+주간 정산 알람 재등록
+```
+
+---
+
+## 핵심 이벤트 정의 (Core Event Definitions)
+
+핵심 이벤트는 앱의 비즈니스 로직을 트리거하는 주요 사건들입니다. 각 이벤트는 특정 조건에서 발생하며, 시스템의 특정 컴포넌트에 의해 처리됩니다.
+
+### A. 차단 관련 이벤트 (Blocking Events)
+
+#### 1. TYPE_WINDOW_STATE_CHANGED (앱 실행 감지)
+
+**위치**: [`AppBlockingService.onAccessibilityEvent()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+
+**발생 조건**: 사용자가 특정 앱(예: 유튜브)을 터치하여 화면 전환이 일어날 때 발생하는 접근성 이벤트입니다.
+
+**처리 로직**:
+- `event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED` 확인
+- `event.packageName`에서 패키지명 추출
+- `handleAppLaunch()` 호출
+
+**관련 컴포넌트**:
+- `AppBlockingService`: 이벤트 수신 및 처리
+- `AccessibilityService`: 시스템 이벤트 제공
+
+#### 2. handleAppLaunch (차단 여부 판단)
+
+**위치**: [`AppBlockingService.handleAppLaunch()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+
+**발생 조건**: `TYPE_WINDOW_STATE_CHANGED` 이벤트에서 패키지명이 추출된 후 발생합니다.
+
+**처리 로직**:
+- 메모리 캐시(`blockedAppsCache`)에서 차단 여부 확인
+- 차단된 앱인 경우: 4-6초 지연 후 오버레이 표시
+- 차단되지 않은 앱인 경우: 오버레이 숨김
+
+**관련 컴포넌트**:
+- `AppBlockingService`: 차단 여부 판단
+- `blockedAppsCache`: 메모리 캐시 (HashSet)
+
+#### 3. showOverlay (오버레이 노출)
+
+**위치**: [`AppBlockingService.showOverlay()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+
+**발생 조건**: `TYPE_WINDOW_STATE_CHANGED` 이벤트에서 패키지명이 추출된 후 발생합니다.
+
+**처리 로직**:
+- 메모리 캐시(`blockedAppsCache`)에서 차단 여부 확인
+- 차단된 앱인 경우: 4-6초 지연 후 오버레이 표시
+- 차단되지 않은 앱인 경우: 오버레이 숨김
+
+**관련 컴포넌트**:
+- `AppBlockingService`: 차단 여부 판단
+- `blockedAppsCache`: 메모리 캐시 (HashSet)
+
+**발생 조건**: 차단 대상 앱임이 확인되고 4-6초 지연 시간이 경과한 후 발생합니다.
+
+**처리 로직**:
+- `GuiltyNegotiationOverlay` 인스턴스 생성
+- `WindowManager`를 통해 시스템 레벨 오버레이 표시
+- 30초 카운트다운 시작
+
+**관련 컴포넌트**:
+- `AppBlockingService`: 오버레이 트리거
+- `GuiltyNegotiationOverlay`: 오버레이 UI 표시
+- `WindowManager`: 시스템 레벨 오버레이 관리
+
+### B. 포인트 및 페널티 이벤트 (Point & Penalty Events)
+
+#### 1. onProceed (강행 실행)
+
+**위치**: [`GuiltyNegotiationOverlay.onProceed()`](app/src/main/java/com/faust/presentation/view/GuiltyNegotiationOverlay.kt)
+
+**발생 조건**: 사용자가 오버레이에서 '강행' 버튼을 선택할 때 발생합니다.
+
+**처리 로직**:
+- `PenaltyService.applyLaunchPenalty()` 호출
+- Free 티어: 3 WP 차감
+- 오버레이 닫기
+
+**관련 컴포넌트**:
+- `GuiltyNegotiationOverlay`: 사용자 인터랙션 처리
+- `PenaltyService`: 페널티 계산 및 적용
+- `FaustDatabase`: 포인트 차감 (트랜잭션)
+
+#### 2. onCancel (철회)
+
+**위치**: [`GuiltyNegotiationOverlay.onCancel()`](app/src/main/java/com/faust/presentation/view/GuiltyNegotiationOverlay.kt)
+
+**발생 조건**: 사용자가 오버레이에서 '철회' 버튼을 선택할 때 발생합니다.
+
+**처리 로직**:
+- `PenaltyService.applyQuitPenalty()` 호출
+- Free 티어: 페널티 0 (차감 없음)
+- 오버레이 닫기
+
+**관련 컴포넌트**:
+- `GuiltyNegotiationOverlay`: 사용자 인터랙션 처리
+- `PenaltyService`: 페널티 계산 및 적용
+
+#### 3. processMining (포인트 채굴)
+
+**위치**: [`PointMiningService.processMining()`](app/src/main/java/com/faust/services/PointMiningService.kt)
+
+**발생 조건**: `PointMiningService`에서 1분마다 실행되며, 현재 사용 중인 앱이 차단 목록에 없을 경우 발생합니다.
+
+**처리 로직**:
+- 포그라운드 앱 확인
+- 차단 목록 확인 (차단된 앱이면 중지)
+- 같은 앱 사용 시간 계산
+- 10분당 1 WP 기준으로 포인트 계산 (Free 티어는 0.5x)
+- 포인트 적립 (트랜잭션 보장)
+
+**관련 컴포넌트**:
+- `PointMiningService`: 채굴 로직 실행
+- `UsageStatsManager`: 포그라운드 앱 조회
+- `FaustDatabase`: 포인트 적립 (트랜잭션)
+
+### C. 데이터 동기화 이벤트 (Data Synchronization Events)
+
+#### 1. getTotalPointsFlow (UI 업데이트)
+
+**위치**: [`MainViewModel.observePoints()`](app/src/main/java/com/faust/presentation/viewmodel/MainViewModel.kt) → [`PointTransactionDao.getTotalPointsFlow()`](app/src/main/java/com/faust/data/database/PointTransactionDao.kt)
+
+**발생 조건**: 데이터베이스의 포인트 합계가 변경되면 자동으로 발생합니다.
+
+**처리 로직**:
+- `MainViewModel`에서 `PointTransactionDao.getTotalPointsFlow()` Flow 구독
+- 포인트 변경 시 `currentPoints` StateFlow 업데이트
+- `MainActivity`에서 StateFlow 관찰하여 UI 자동 갱신
+
+**관련 컴포넌트**:
+- `MainActivity`: StateFlow 관찰 및 UI 업데이트
+- `MainViewModel`: 데이터 관찰 및 StateFlow 관리
+- `PointTransactionDao`: Flow 제공
+- `FaustDatabase`: 데이터 변경 감지
+
+#### 2. observeBlockedApps (차단 앱 목록 관찰)
+
+**위치**: [`MainViewModel.observeBlockedApps()`](app/src/main/java/com/faust/presentation/viewmodel/MainViewModel.kt)
+
+**발생 조건**: 차단 앱 목록 데이터베이스에 변경이 생기면 자동으로 발생합니다.
+
+**처리 로직**:
+- `MainViewModel`에서 `AppBlockDao.getAllBlockedApps()` Flow 구독
+- 차단 앱 목록 변경 시 `blockedApps` StateFlow 업데이트
+- `MainActivity`에서 StateFlow 관찰하여 UI 자동 갱신
+
+**관련 컴포넌트**:
+- `MainActivity`: StateFlow 관찰 및 UI 업데이트
+- `MainViewModel`: 데이터 관찰 및 StateFlow 관리
+- `AppBlockDao`: Flow 제공
+- `FaustDatabase`: 데이터 변경 감지
+
+#### 3. initializeBlockedAppsCache (캐시 동기화)
+
+**위치**: [`AppBlockingService.initializeBlockedAppsCache()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+
+**발생 조건**: 
+- 서비스 시작 시 초기 로드
+- 차단 목록 데이터베이스에 변경이 생기면 Flow를 통해 자동 발생
+
+**처리 로직**:
+- 초기 로드: `getAllBlockedApps().first()`로 차단 앱 목록 로드
+- Flow 구독: `getAllBlockedApps().collect()`로 변경사항 실시간 감지
+- 메모리 캐시(`blockedAppsCache`) 즉시 업데이트
+
+**관련 컴포넌트**:
+- `AppBlockingService`: 캐시 관리
+- `AppBlockDao`: 차단 앱 목록 제공 (Flow)
+- `blockedAppsCache`: 메모리 캐시 (HashSet)
 
 ---
 
