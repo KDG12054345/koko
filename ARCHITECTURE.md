@@ -106,47 +106,49 @@ com.faust/
 
 ## 데이터 흐름
 
-### 1. 앱 차단 플로우
+### 1. 앱 차단 플로우 (Event-driven)
 
 ```mermaid
 sequenceDiagram
     participant User
     participant MainActivity
+    participant System
     participant AppBlockingService
-    participant UsageStatsManager
     participant Database
     participant GuiltyNegotiationOverlay
     participant PenaltyService
 
     User->>MainActivity: 앱 추가
     MainActivity->>Database: 차단 앱 저장
-    MainActivity->>AppBlockingService: 서비스 시작
+    MainActivity->>System: 접근성 서비스 활성화 요청
     
+    System->>AppBlockingService: 서비스 연결 (onServiceConnected)
     AppBlockingService->>Database: 차단 앱 목록 초기 로드
     AppBlockingService->>AppBlockingService: 메모리 캐시에 저장 (HashSet)
     AppBlockingService->>Database: Flow 구독 시작 (변경사항 감지)
     
-    loop 매 1초마다
-        AppBlockingService->>UsageStatsManager: 포그라운드 앱 조회
-        UsageStatsManager-->>AppBlockingService: 현재 앱 패키지명
-        AppBlockingService->>AppBlockingService: 메모리 캐시에서 차단 여부 확인
+    Note over System,AppBlockingService: 이벤트 기반 감지 시작
+    
+    User->>System: 앱 실행
+    System->>AppBlockingService: TYPE_WINDOW_STATE_CHANGED 이벤트 발생
+    AppBlockingService->>AppBlockingService: 패키지명 추출
+    AppBlockingService->>AppBlockingService: 메모리 캐시에서 차단 여부 확인
+    
+    alt 차단된 앱인 경우
+        AppBlockingService->>AppBlockingService: 4-6초 대기
+        AppBlockingService->>GuiltyNegotiationOverlay: 오버레이 표시
+        GuiltyNegotiationOverlay->>User: 강행/철회 선택 대기
         
-        alt 차단된 앱인 경우
-            AppBlockingService->>AppBlockingService: 4-6초 대기
-            AppBlockingService->>GuiltyNegotiationOverlay: 오버레이 표시
-            GuiltyNegotiationOverlay->>User: 강행/철회 선택 대기
-            
-            alt 강행 선택
-                GuiltyNegotiationOverlay->>PenaltyService: 강행 페널티 적용
-                PenaltyService->>Database: 트랜잭션 시작
-                PenaltyService->>Database: 현재 포인트 조회 (SUM)
-                PenaltyService->>Database: 거래 내역 저장 (PENALTY)
-                PenaltyService->>PreferenceManager: 동기화
-                PenaltyService->>Database: 트랜잭션 커밋
-            else 철회 선택
-                GuiltyNegotiationOverlay->>PenaltyService: 철회 처리
-                PenaltyService->>Database: (Free 티어는 차감 없음)
-            end
+        alt 강행 선택
+            GuiltyNegotiationOverlay->>PenaltyService: 강행 페널티 적용
+            PenaltyService->>Database: 트랜잭션 시작
+            PenaltyService->>Database: 현재 포인트 조회 (SUM)
+            PenaltyService->>Database: 거래 내역 저장 (PENALTY)
+            PenaltyService->>PreferenceManager: 동기화
+            PenaltyService->>Database: 트랜잭션 커밋
+        else 철회 선택
+            GuiltyNegotiationOverlay->>PenaltyService: 철회 처리
+            PenaltyService->>Database: (Free 티어는 차감 없음)
         end
     end
 ```
@@ -239,16 +241,18 @@ sequenceDiagram
 ### 2. Service Layer
 
 #### AppBlockingService
-- **타입**: `LifecycleService` (Foreground Service)
+- **타입**: `AccessibilityService` (이벤트 기반 서비스)
 - **책임**: 
-  - `UsageStatsManager`로 포그라운드 앱 모니터링
+  - `TYPE_WINDOW_STATE_CHANGED` 이벤트를 통한 앱 실행 실시간 감지
   - 차단된 앱 감지 시 오버레이 트리거
-- **주기**: 1초마다 체크
+- **감지 방식**: 이벤트 기반 (Event-driven)
+  - Polling 방식 제거로 배터리 효율 극대화
+  - 앱 실행 즉시 감지 (실시간성 보장)
 - **성능 최적화**:
   - 차단된 앱 목록을 `HashSet<String>`으로 메모리 캐싱
   - 서비스 시작 시 1회만 DB 로드
   - `getAllBlockedApps()` Flow를 구독하여 변경사항만 감지
-  - DB 조회 제거로 배터리 소모 감소
+  - 이벤트 발생 시에만 처리 (배터리 소모 최소화)
 
 #### PointMiningService
 - **타입**: `LifecycleService` (Foreground Service)
@@ -327,9 +331,10 @@ sequenceDiagram
                 │                   │
     ┌───────────▼──────────┐  ┌────▼──────────────────┐
     │ AppBlockingService    │  │ PointMiningService   │
-    │                       │  │                      │
-    │ • UsageStats 모니터링 │  │ • 앱 사용 시간 추적  │
-    │ • 오버레이 트리거     │  │ • 포인트 자동 적립    │
+    │ (AccessibilityService)│  │                      │
+    │                       │  │ • 앱 사용 시간 추적  │
+    │ • 이벤트 기반 감지     │  │ • 포인트 자동 적립    │
+    │ • 오버레이 트리거     │  │                      │
     └───────────┬──────────┘  └────┬──────────────────┘
                 │                   │
                 │                   │
@@ -354,13 +359,13 @@ sequenceDiagram
   │     │
   │     ├─► 권한 확인
   │     │     │
-  │     │     ├─► UsageStats 권한
+  │     │     ├─► 접근성 서비스 권한
   │     │     └─► Overlay 권한
   │     │
   │     └─► 서비스 시작
   │           │
-  │           ├─► AppBlockingService.startForeground()
-  │           │     └─► 지속적 모니터링 루프
+  │           ├─► AppBlockingService (시스템 자동 시작)
+  │           │     └─► 이벤트 기반 감지 (TYPE_WINDOW_STATE_CHANGED)
   │           │
   │           └─► PointMiningService.startForeground()
   │                 └─► 주기적 포인트 계산
@@ -500,9 +505,9 @@ UI 반응형 업데이트
 ## 보안 및 권한
 
 ### 필수 권한
-1. **PACKAGE_USAGE_STATS**: 앱 사용 통계 조회
+1. **BIND_ACCESSIBILITY_SERVICE**: 접근성 서비스를 통한 앱 실행 감지
 2. **SYSTEM_ALERT_WINDOW**: 오버레이 표시
-3. **FOREGROUND_SERVICE**: 백그라운드 서비스 실행
+3. **FOREGROUND_SERVICE**: 백그라운드 서비스 실행 (PointMiningService용)
 4. **QUERY_ALL_PACKAGES**: 설치된 앱 목록 조회
 
 ### 권한 요청 플로우
@@ -511,10 +516,20 @@ MainActivity
   ↓
 권한 확인
   ↓
-[없음] → Settings 화면으로 이동
-  ↓
-[있음] → 서비스 시작
+├─► 접근성 서비스 권한 확인
+│     ↓
+│     [없음] → 접근성 설정 화면으로 이동
+│     ↓
+│     [있음] → 다음 권한 확인
+│
+└─► 오버레이 권한 확인
+      ↓
+      [없음] → 오버레이 권한 설정 화면으로 이동
+      ↓
+      [있음] → 서비스 시작
 ```
+
+**참고**: 접근성 서비스는 시스템이 자동으로 시작하므로 별도의 서비스 시작 호출이 필요 없습니다.
 
 ---
 
@@ -537,21 +552,27 @@ MainActivity
 ## 성능 최적화
 
 ### 현재 구현
-- **메모리 캐싱**: `AppBlockingService`에서 차단된 앱 목록을 `HashSet`으로 캐싱하여 DB 조회 제거
+- **이벤트 기반 감지**: `AppBlockingService`가 `AccessibilityService`를 활용하여 앱 실행 이벤트를 실시간 감지
+- **메모리 캐싱**: 차단된 앱 목록을 `HashSet`으로 캐싱하여 DB 조회 제거
 - **Flow 구독**: 변경사항만 감지하여 불필요한 업데이트 방지
 - **반응형 UI**: Room Database의 Flow를 통한 반응형 데이터 업데이트
 - **비동기 처리**: Coroutine을 사용한 비동기 처리
-- **백그라운드 작업**: Foreground Service로 백그라운드 작업 보장
+- **백그라운드 작업**: AccessibilityService로 시스템 레벨 이벤트 감지
 
 ### 최적화 상세
 
 #### AppBlockingService 최적화
-- **이전**: 1초마다 DB 조회 (`getBlockedApp()`)
+- **이전**: Polling 방식 (1초마다 `queryUsageStats()` 호출)
 - **현재**: 
+  - **이벤트 기반 감지**: `AccessibilityService`의 `TYPE_WINDOW_STATE_CHANGED` 이벤트 활용
   - 서비스 시작 시 1회만 DB 로드
   - `getAllBlockedApps()` Flow 구독으로 변경사항만 감지
   - 메모리 캐시 (`ConcurrentHashMap.newKeySet<String>()`)에서 조회
-- **효과**: 배터리 소모 대폭 감소, 응답 속도 향상
+  - **Polling 루프 완전 제거**
+- **효과**: 
+  - 배터리 소모 대폭 감소 (이벤트 발생 시에만 처리)
+  - 실시간 감지 (앱 실행 즉시 감지)
+  - 시스템 리소스 사용 최소화
 
 #### MainActivity UI 최적화
 - **이전**: `while(true)` 루프로 5초마다 포인트 업데이트
@@ -562,8 +583,8 @@ MainActivity
 
 ### 개선 가능 영역
 - 데이터베이스 인덱싱
-- 서비스 체크 주기 최적화
 - 메모리 누수 방지 (Lifecycle-aware 컴포넌트)
+- PointMiningService도 이벤트 기반으로 전환 검토
 
 ---
 
