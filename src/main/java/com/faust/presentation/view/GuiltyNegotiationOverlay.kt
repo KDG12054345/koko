@@ -1,6 +1,7 @@
 package com.faust.presentation.view
 
 import android.content.Context
+import android.content.Intent
 import android.graphics.PixelFormat
 import android.os.Build
 import android.provider.Settings
@@ -35,6 +36,7 @@ class GuiltyNegotiationOverlay(
     private var packageName: String = ""
     private var appName: String = ""
     private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+    private var isUserActionCompleted: Boolean = false // 사용자 액션 완료 여부
 
     companion object {
         private const val TAG = "GuiltyNegotiationOverlay"
@@ -57,17 +59,25 @@ class GuiltyNegotiationOverlay(
     fun show(packageName: String, appName: String) {
         this.packageName = packageName
         this.appName = appName
+        isUserActionCompleted = false // 사용자 액션 플래그 초기화
 
         if (overlayView != null) {
+            Log.d(TAG, "Overlay already showing, skipping")
             return // 이미 표시 중
         }
 
         // 오버레이 권한 확인 (BadTokenException 방지)
-        if (!checkOverlayPermission()) {
+        val hasPermission = checkOverlayPermission()
+        Log.d(TAG, "Overlay permission check: $hasPermission")
+        
+        if (!hasPermission) {
             Log.w(TAG, "Overlay permission not granted, cannot show overlay")
+            Log.w(TAG, "Settings.canDrawOverlays(context) = ${if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) Settings.canDrawOverlays(context) else "N/A (API < 23)"}")
             return
         }
 
+        // 권한이 있는 경우 즉시 오버레이 표시 시도
+        Log.d(TAG, "Overlay permission granted, attempting to show overlay")
         lifecycleRegistry.currentState = Lifecycle.State.CREATED
         lifecycleRegistry.currentState = Lifecycle.State.STARTED
 
@@ -83,12 +93,16 @@ class GuiltyNegotiationOverlay(
             val params = createWindowParams()
             try {
                 windowManager.addView(view, params)
+                Log.d(TAG, "Overlay view added successfully")
                 startCountdown()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to add overlay view", e)
+                Log.e(TAG, "Exception type: ${e.javaClass.simpleName}, message: ${e.message}")
                 // 오버레이 추가 실패
                 overlayView = null
             }
+        } ?: run {
+            Log.e(TAG, "Failed to create overlay view")
         }
     }
 
@@ -98,24 +112,42 @@ class GuiltyNegotiationOverlay(
      */
     private fun checkOverlayPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            Settings.canDrawOverlays(context)
+            val hasPermission = Settings.canDrawOverlays(context)
+            Log.d(TAG, "checkOverlayPermission: SDK >= M, result = $hasPermission")
+            hasPermission
         } else {
+            Log.d(TAG, "checkOverlayPermission: SDK < M, returning true")
             true
         }
     }
 
-    fun dismiss() {
+    /**
+     * 오버레이를 닫습니다.
+     * 사용자가 버튼을 누르기 전까지는 호출되지 않도록 보호됩니다.
+     * @param force 강제로 닫을지 여부 (기본값: false, 사용자 액션으로만 닫을 수 있음)
+     */
+    fun dismiss(force: Boolean = false) {
+        // 사용자 액션이 완료되지 않았고 강제가 아니면 닫지 않음
+        if (!isUserActionCompleted && !force) {
+            Log.w(TAG, "dismiss() called but user action not completed. Ignoring dismiss request.")
+            Log.w(TAG, "Overlay can only be dismissed after user clicks proceed or cancel button.")
+            return
+        }
+        
+        Log.d(TAG, "Dismissing overlay (force=$force, userActionCompleted=$isUserActionCompleted)")
         countdownJob?.cancel()
         coroutineScope.cancel()
         overlayView?.let { view ->
             try {
                 windowManager?.removeView(view)
+                Log.d(TAG, "Overlay view removed successfully")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to remove overlay view", e)
             }
         }
         overlayView = null
         windowManager = null
+        isUserActionCompleted = false
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
     }
 
@@ -175,9 +207,11 @@ class GuiltyNegotiationOverlay(
      * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
      */
     private fun onProceed() {
+        Log.d(TAG, "User clicked proceed button")
+        isUserActionCompleted = true
         // 강행 실행 - 페널티 적용
         penaltyService.applyLaunchPenalty(packageName, appName)
-        dismiss()
+        dismiss(force = true)
     }
 
     /**
@@ -185,14 +219,40 @@ class GuiltyNegotiationOverlay(
      * 
      * 역할: 사용자가 '철회'를 선택할 때 발생하며, 오버레이를 닫고 해당 앱 사용을 중단하도록 유도합니다 (Free 티어는 페널티 0).
      * 트리거: 사용자가 오버레이의 '철회' 버튼 클릭
-     * 처리: PenaltyService.applyQuitPenalty() 호출 (Free 티어: 페널티 0), 오버레이 닫기
+     * 처리: PenaltyService.applyQuitPenalty() 호출 (Free 티어: 페널티 0), 홈 화면으로 이동, 오버레이 닫기
      * 
      * @see ARCHITECTURE.md#핵심-이벤트-정의-core-event-definitions
      */
     private fun onCancel() {
+        Log.d(TAG, "User clicked cancel button")
+        isUserActionCompleted = true
         // 철회 - Free 티어는 페널티 없음
         penaltyService.applyQuitPenalty(packageName, appName)
-        dismiss()
+        
+        // 홈 화면으로 이동
+        val intent = Intent(Intent.ACTION_MAIN).apply {
+            addCategory(Intent.CATEGORY_HOME)
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        context.startActivity(intent)
+        Log.d(TAG, "Launched home screen intent")
+        
+        // 오버레이 제거
+        overlayView?.let { view ->
+            try {
+                windowManager?.removeView(view)
+                Log.d(TAG, "Overlay view removed after cancel")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to remove overlay view after cancel", e)
+            }
+        }
+        
+        // 리소스 정리
+        countdownJob?.cancel()
+        coroutineScope.cancel()
+        overlayView = null
+        windowManager = null
+        lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
     }
 
     private fun createWindowParams(): WindowManager.LayoutParams {
@@ -209,10 +269,18 @@ class GuiltyNegotiationOverlay(
             type,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_INSET_DECOR or
+                    WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+                    WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+                    WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.CENTER
+            // 최상단에 고정되도록 설정
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
         }
     }
 }

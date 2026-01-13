@@ -53,14 +53,21 @@ class AppSelectionDialog(
             val apps = withContext(Dispatchers.IO) {
                 val pm = requireContext().packageManager
                 pm.getInstalledApplications(PackageManager.GET_META_DATA)
-                    .filter { it.flags and ApplicationInfo.FLAG_SYSTEM == 0 } // 시스템 앱 제외
+                    .filter { 
+                        // 런처 아이콘이 있는 앱만 표시 (실제 사용 가능한 앱)
+                        try {
+                            pm.getLaunchIntentForPackage(it.packageName) != null
+                        } catch (e: Exception) {
+                            false
+                        }
+                    }
                     .map {
                         BlockedApp(
                             packageName = it.packageName,
                             appName = pm.getApplicationLabel(it).toString()
                         )
                     }
-                    .sortedBy { it.appName }
+                    .sortedBy { it.appName } // 앱 이름순 정렬
             }
             appListAdapter.submitList(apps)
         }

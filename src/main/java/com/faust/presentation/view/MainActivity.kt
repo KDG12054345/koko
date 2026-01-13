@@ -2,12 +2,15 @@ package com.faust.presentation.view
 
 import android.Manifest
 import android.app.AlertDialog
+import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.util.Log
 import android.widget.Button
 import android.widget.TextView
 import android.widget.Toast
@@ -44,6 +47,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var textCurrentPoints: TextView
     private lateinit var buttonAddApp: Button
     private lateinit var fabStartService: FloatingActionButton
+    
+    private val prefs: SharedPreferences by lazy {
+        getSharedPreferences("faust_alarm_prefs", Context.MODE_PRIVATE)
+    }
+    
+    private companion object {
+        private const val TAG = "MainActivity"
+        private const val KEY_ALARM_PERMISSION_ERROR = "alarm_permission_error_occurred"
+    }
 
     private val overlayPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -79,17 +91,41 @@ class MainActivity : AppCompatActivity() {
         setupToolbar()
         setupViews()
         setupRecyclerView()
+        
+        // 앱 시작 시 오버레이 권한 확인
+        checkOverlayPermissionOnStart()
+        
         checkPermissions()
         observeViewModel()
         
-        // 주간 정산 스케줄링
-        WeeklyResetService.scheduleWeeklyReset(this)
+        // 주간 정산 스케줄링 (권한 에러로 한 번 죽었다면 다시 시도하지 않음)
+        if (!hasAlarmPermissionError()) {
+            try {
+                WeeklyResetService.scheduleWeeklyReset(this)
+            } catch (e: SecurityException) {
+                Log.e(TAG, "SecurityException when scheduling weekly reset in onCreate", e)
+                // 권한 에러 발생 시 플래그 저장
+                saveAlarmPermissionError()
+                // 비정확 알람으로 재시도하지 않음 (이미 WeeklyResetService 내부에서 처리됨)
+            } catch (e: Exception) {
+                Log.e(TAG, "Unexpected exception when scheduling weekly reset", e)
+            }
+        } else {
+            Log.w(TAG, "Skipping weekly reset scheduling: alarm permission error occurred previously")
+        }
     }
 
     private fun setupToolbar() {
         val toolbar = findViewById<androidx.appcompat.widget.Toolbar>(R.id.toolbar)
-        setSupportActionBar(toolbar)
-        supportActionBar?.title = getString(R.string.app_name)
+        if (toolbar != null) {
+            // 액션바가 이미 설정되어 있지 않은 경우에만 설정 (중복 방지)
+            if (supportActionBar == null) {
+                setSupportActionBar(toolbar)
+            }
+            supportActionBar?.title = getString(R.string.app_name)
+        } else {
+            android.util.Log.e("MainActivity", "Toolbar not found with ID: toolbar")
+        }
     }
 
     private fun setupViews() {
@@ -209,12 +245,44 @@ class MainActivity : AppCompatActivity() {
         return AppBlockingService.isServiceEnabled(this)
     }
 
+    /**
+     * '다른 앱 위에 표시' 권한이 있는지 확인합니다.
+     * @return 권한이 있으면 true, 없으면 false
+     */
     private fun checkOverlayPermission(): Boolean {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             Settings.canDrawOverlays(this)
         } else {
             true
         }
+    }
+    
+    /**
+     * 앱 시작 시 오버레이 권한을 확인하고, 없으면 설정 화면으로 유도합니다.
+     */
+    private fun checkOverlayPermissionOnStart() {
+        if (!checkOverlayPermission()) {
+            AlertDialog.Builder(this)
+                .setTitle("권한 필요")
+                .setMessage("앱 차단 기능을 위해 다른 앱 위에 표시 권한이 필요합니다")
+                .setPositiveButton("설정으로 이동") { _, _ ->
+                    requestOverlayPermission()
+                }
+                .setNegativeButton("나중에", null)
+                .setCancelable(false)
+                .show()
+        }
+    }
+    
+    /**
+     * 오버레이 권한 설정 화면으로 이동합니다.
+     */
+    private fun requestOverlayPermission() {
+        val intent = Intent(
+            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+            Uri.parse("package:$packageName")
+        )
+        overlayPermissionLauncher.launch(intent)
     }
 
     private fun showPermissionDialog() {
@@ -255,10 +323,56 @@ class MainActivity : AppCompatActivity() {
     
     override fun onResume() {
         super.onResume()
+        
+        // 오버레이 권한 재확인 및 버튼 활성화 상태 업데이트
+        updateServiceButtonState()
+        
         // 접근성 서비스 권한이 활성화되었는지 확인
         if (checkAccessibilityService() && checkOverlayPermission()) {
             // 모든 권한이 활성화되었으면 서비스 시작
             PointMiningService.startService(this)
         }
+        
+        // 알람 권한이 부여되었는지 확인하고, 부여되었다면 플래그 초기화
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as android.app.AlarmManager
+            if (alarmManager.canScheduleExactAlarms() && hasAlarmPermissionError()) {
+                // 권한이 부여되었으므로 플래그 초기화
+                clearAlarmPermissionError()
+                Log.d(TAG, "Alarm permission granted, cleared error flag")
+            }
+        }
+    }
+    
+    /**
+     * 서비스 시작 버튼의 활성화 상태를 권한에 따라 업데이트합니다.
+     */
+    private fun updateServiceButtonState() {
+        if (::fabStartService.isInitialized) {
+            val hasAllPermissions = checkAllPermissions()
+            fabStartService.isEnabled = hasAllPermissions
+            fabStartService.alpha = if (hasAllPermissions) 1.0f else 0.5f
+        }
+    }
+    
+    /**
+     * 알람 권한 에러 발생 여부를 확인합니다.
+     */
+    private fun hasAlarmPermissionError(): Boolean {
+        return prefs.getBoolean(KEY_ALARM_PERMISSION_ERROR, false)
+    }
+    
+    /**
+     * 알람 권한 에러 발생 플래그를 저장합니다.
+     */
+    private fun saveAlarmPermissionError() {
+        prefs.edit().putBoolean(KEY_ALARM_PERMISSION_ERROR, true).apply()
+    }
+    
+    /**
+     * 알람 권한 에러 플래그를 초기화합니다.
+     */
+    private fun clearAlarmPermissionError() {
+        prefs.edit().putBoolean(KEY_ALARM_PERMISSION_ERROR, false).apply()
     }
 }

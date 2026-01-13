@@ -50,7 +50,8 @@
                         android:text="@string/current_points"
                         android:textSize="32sp"
                         android:textStyle="bold"
-                        android:textColor="@color/purple_700" />
+                        android:textColor="@color/purple_700"
+                        android:importantForAccessibility="no" />
 
                 </LinearLayout>
 
@@ -63,7 +64,8 @@
                 android:text="@string/blocked_apps"
                 android:textSize="20sp"
                 android:textStyle="bold"
-                android:layout_marginBottom="8dp" />
+                android:layout_marginBottom="8dp"
+                android:importantForAccessibility="no" />
 
             <androidx.recyclerview.widget.RecyclerView
                 android:id="@+id/recyclerViewBlockedApps"
@@ -78,7 +80,8 @@
                 android:layout_height="wrap_content"
                 android:text="@string/add_app"
                 android:textSize="16sp"
-                app:icon="@android:drawable/ic_input_add" />
+                app:icon="@android:drawable/ic_input_add"
+                android:importantForAccessibility="no" />
 
         </LinearLayout>
 
@@ -91,6 +94,7 @@
         android:layout_gravity="bottom|end"
         android:layout_margin="16dp"
         android:src="@android:drawable/ic_media_play"
-        app:tint="@color/white" />
+        app:tint="@color/white"
+        android:importantForAccessibility="no" />
 
 </androidx.coordinatorlayout.widget.CoordinatorLayout>
