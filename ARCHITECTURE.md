@@ -1431,6 +1431,62 @@ WeeklyResetReceiver.onReceive()
 - `PenaltyService`: 도주 패널티 적용 (Case 1)
 - `PointMiningService`: 채굴 재개
 
+#### 9. 강제 홈 버튼 클릭 호출 시점
+
+**개요**: 강제 홈 이동(`navigateToHome()` 또는 `hideOverlay(shouldGoHome = true)`)이 호출되는 모든 시점을 정리합니다.
+
+**호출 시점**:
+
+1. **사용자 철회 버튼 클릭**
+   - **위치**: [`GuiltyNegotiationOverlay.onCancel()`](app/src/main/java/com/faust/presentation/view/GuiltyNegotiationOverlay.kt:243)
+   - **발생 조건**: 오버레이에서 사용자가 '철회' 버튼을 클릭할 때
+   - **처리 로직**:
+     - `PenaltyService.applyQuitPenalty(packageName, appName)` 호출 (3 WP 차감)
+     - `AppBlockingService.hideOverlay(shouldGoHome = true)` 호출
+     - 내부적으로 `navigateToHome("오버레이 종료 요청")` 실행
+   - **관련 컴포넌트**:
+     - `GuiltyNegotiationOverlay`: 사용자 인터랙션 처리
+     - `PenaltyService`: 철회 패널티 적용
+     - `AppBlockingService`: 홈 이동 실행
+
+2. **협상 중 화면 OFF (도주 감지)**
+   - **위치**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt:256) - Case 1
+   - **발생 조건**: 오버레이가 표시 중인 상태에서 사용자가 기기 화면을 끌 때
+   - **처리 로직**:
+     - 도주 감지 로그 출력
+     - `PenaltyService.applyQuitPenalty(targetPackage, targetAppName)` 호출 (3 WP 차감)
+     - `hideOverlay(shouldGoHome = true)` 호출
+     - 내부적으로 `navigateToHome("오버레이 종료 요청")` 실행
+     - `PointMiningService.resumeMining()` 호출하여 채굴 재개
+   - **관련 컴포넌트**:
+     - `AppBlockingService`: 화면 OFF 이벤트 수신 및 도주 감지
+     - `PenaltyService`: 도주 패널티 적용
+     - `PointMiningService`: 채굴 재개
+
+3. **차단 상태에서 화면 OFF**
+   - **위치**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt:256) - Case 2
+   - **발생 조건**: 오버레이 없이 차단 상태에서 사용자가 기기 화면을 끌 때
+   - **처리 로직**:
+     - `navigateToHome("차단 상태")` 직접 호출
+     - `PointMiningService.resumeMining()` 호출하여 채굴 재개
+   - **관련 컴포넌트**:
+     - `AppBlockingService`: 화면 OFF 이벤트 수신 및 홈 이동
+     - `PointMiningService`: 채굴 재개
+
+**홈 이동 구현 방식**:
+- **위치**: [`AppBlockingService.navigateToHome()`](app/src/main/java/com/faust/services/AppBlockingService.kt:227)
+- **구현 방식**:
+  1. **Intent 방식**: `Intent.ACTION_MAIN` + `CATEGORY_HOME` 플래그로 홈 화면 Intent 생성 및 실행
+  2. **Global Action 방식**: `performGlobalAction(GLOBAL_ACTION_HOME)` 호출 (AccessibilityService API 활용)
+- **이중 보장**: 두 방식 모두 시도하여 홈 이동 성공률을 높임
+- **에러 처리**: Intent 방식 실패 시에도 Global Action 방식으로 재시도
+
+**관련 컴포넌트**:
+- `AppBlockingService`: 홈 이동 로직 구현 및 호출
+- `GuiltyNegotiationOverlay`: 사용자 철회 액션 처리
+- `PenaltyService`: 철회/도주 패널티 적용
+- `PointMiningService`: 채굴 재개
+
 ### C. 데이터 동기화 이벤트 (Data Synchronization Events)
 
 #### 1. getTotalPointsFlow (UI 업데이트)
