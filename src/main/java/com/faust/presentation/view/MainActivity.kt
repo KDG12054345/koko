@@ -9,6 +9,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
 import android.widget.Button
@@ -77,6 +78,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private val batteryOptimizationLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (isIgnoringBatteryOptimizations()) {
+            startServices()
+        } else {
+            Toast.makeText(this, "배터리 최적화 제외가 필요합니다", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     /**
      * [시스템 진입점: 사용자 진입점]
      * 
@@ -92,8 +103,8 @@ class MainActivity : AppCompatActivity() {
         setupViews()
         setupRecyclerView()
         
-        // 앱 시작 시 오버레이 권한 확인
-        checkOverlayPermissionOnStart()
+        // 앱 시작 시 권한 확인
+        checkPermissionsOnStart()
         
         checkPermissions()
         observeViewModel()
@@ -241,6 +252,65 @@ class MainActivity : AppCompatActivity() {
         return checkAccessibilityService() && checkOverlayPermission()
     }
 
+    /**
+     * 배터리 최적화 제외 여부를 확인합니다.
+     * @return 배터리 최적화에서 제외되어 있으면 true, 아니면 false
+     */
+    private fun isIgnoringBatteryOptimizations(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            powerManager.isIgnoringBatteryOptimizations(packageName)
+        } else {
+            true // Android M 이하는 항상 true
+        }
+    }
+
+    /**
+     * 배터리 최적화 제외가 필요한지 확인하고, 필요하면 요청합니다.
+     */
+    private fun checkBatteryOptimization() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            if (!isIgnoringBatteryOptimizations()) {
+                showBatteryOptimizationDialog()
+            } else {
+                startServices()
+            }
+        } else {
+            startServices()
+        }
+    }
+
+    /**
+     * 배터리 최적화 제외 요청 다이얼로그를 표시합니다.
+     */
+    private fun showBatteryOptimizationDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("배터리 최적화 제외 필요")
+            .setMessage("백그라운드에서 채굴이 계속되려면 배터리 최적화에서 이 앱을 제외해야 합니다.\n\n" +
+                    "설정 화면에서 '제외' 또는 '허용'을 선택해주세요.")
+            .setPositiveButton("설정으로 이동") { _, _ ->
+                requestBatteryOptimizationExclusion()
+            }
+            .setNegativeButton("나중에") { _, _ ->
+                // 사용자가 나중에 하기로 선택해도 서비스는 시작
+                startServices()
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    /**
+     * 배터리 최적화 제외 설정 화면으로 이동합니다.
+     */
+    private fun requestBatteryOptimizationExclusion() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                data = Uri.parse("package:$packageName")
+            }
+            batteryOptimizationLauncher.launch(intent)
+        }
+    }
+
     private fun checkAccessibilityService(): Boolean {
         return AppBlockingService.isServiceEnabled(this)
     }
@@ -256,17 +326,24 @@ class MainActivity : AppCompatActivity() {
             true
         }
     }
-    
+
     /**
-     * 앱 시작 시 오버레이 권한을 확인하고, 없으면 설정 화면으로 유도합니다.
+     * 앱 시작 시 필수 권한을 확인하고, 없으면 설정 화면으로 유도합니다.
      */
-    private fun checkOverlayPermissionOnStart() {
+    private fun checkPermissionsOnStart() {
+        val missingPermissions = mutableListOf<String>()
+        
         if (!checkOverlayPermission()) {
+            missingPermissions.add("다른 앱 위에 표시 권한")
+        }
+        
+        if (missingPermissions.isNotEmpty()) {
             AlertDialog.Builder(this)
                 .setTitle("권한 필요")
-                .setMessage("앱 차단 기능을 위해 다른 앱 위에 표시 권한이 필요합니다")
+                .setMessage("앱 기능을 위해 다음 권한이 필요합니다:\n\n" +
+                        missingPermissions.joinToString("\n") { "• $it" })
                 .setPositiveButton("설정으로 이동") { _, _ ->
-                    requestOverlayPermission()
+                    requestPermissions()
                 }
                 .setNegativeButton("나중에", null)
                 .setCancelable(false)
@@ -308,6 +385,9 @@ class MainActivity : AppCompatActivity() {
                 Uri.parse("package:$packageName")
             )
             overlayPermissionLauncher.launch(intent)
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !isIgnoringBatteryOptimizations()) {
+            // 모든 권한이 있고 배터리 최적화 제외만 필요한 경우
+            checkBatteryOptimization()
         }
     }
 
@@ -324,13 +404,27 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         
-        // 오버레이 권한 재확인 및 버튼 활성화 상태 업데이트
+        // 권한 재확인 및 버튼 활성화 상태 업데이트
         updateServiceButtonState()
         
-        // 접근성 서비스 권한이 활성화되었는지 확인
+        // 모든 권한이 활성화되었는지 확인
         if (checkAccessibilityService() && checkOverlayPermission()) {
-            // 모든 권한이 활성화되었으면 서비스 시작
-            PointMiningService.startService(this)
+            // 배터리 최적화 제외도 확인 (선택사항이지만 권장)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !isIgnoringBatteryOptimizations()) {
+                // 배터리 최적화 제외가 안 되어 있으면 한 번만 안내
+                val prefs = getSharedPreferences("faust_battery_opt", Context.MODE_PRIVATE)
+                val hasShownDialog = prefs.getBoolean("has_shown_battery_opt_dialog", false)
+                if (!hasShownDialog) {
+                    prefs.edit().putBoolean("has_shown_battery_opt_dialog", true).apply()
+                    checkBatteryOptimization()
+                } else {
+                    // 이미 안내했으면 서비스는 시작
+                    PointMiningService.startService(this)
+                }
+            } else {
+                // 모든 권한이 활성화되었으면 서비스 시작
+                PointMiningService.startService(this)
+            }
         }
         
         // 알람 권한이 부여되었는지 확인하고, 부여되었다면 플래그 초기화
