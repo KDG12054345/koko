@@ -56,7 +56,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _currentPoints.value = 0
                 }
                 .collect { points ->
-                    _currentPoints.value = points
+                    // 포인트는 항상 0 이상으로 보장
+                    _currentPoints.value = points.coerceAtLeast(0)
                 }
         }
     }
@@ -84,12 +85,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     suspend fun addBlockedApp(app: BlockedApp): Boolean {
         return try {
-            // 티어별 최대 앱 수 확인
-            val userTier = preferenceManager.getUserTier()
-            val maxApps = when (userTier) {
-                UserTier.FREE -> 1
-                UserTier.STANDARD -> 3
-                UserTier.FAUST_PRO -> Int.MAX_VALUE
+            // 테스트 모드 확인
+            val testModeMax = preferenceManager.getTestModeMaxApps()
+            val maxApps = if (testModeMax != null) {
+                testModeMax
+            } else {
+                // 티어별 최대 앱 수 확인
+                val userTier = preferenceManager.getUserTier()
+                when (userTier) {
+                    UserTier.FREE -> 1
+                    UserTier.STANDARD -> 3
+                    UserTier.FAUST_PRO -> Int.MAX_VALUE
+                }
             }
 
             val currentCount = database.appBlockDao().getBlockedAppCount()
@@ -120,11 +127,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      * 현재 사용자 티어에 따른 최대 차단 앱 개수를 반환합니다.
      */
     fun getMaxBlockedApps(): Int {
-        val userTier = preferenceManager.getUserTier()
-        return when (userTier) {
-            UserTier.FREE -> 1
-            UserTier.STANDARD -> 3
-            UserTier.FAUST_PRO -> Int.MAX_VALUE
+        // 테스트 모드 확인
+        val testModeMax = preferenceManager.getTestModeMaxApps()
+        return if (testModeMax != null) {
+            testModeMax
+        } else {
+            val userTier = preferenceManager.getUserTier()
+            when (userTier) {
+                UserTier.FREE -> 1
+                UserTier.STANDARD -> 3
+                UserTier.FAUST_PRO -> Int.MAX_VALUE
+            }
         }
     }
 

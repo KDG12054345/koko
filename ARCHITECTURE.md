@@ -12,6 +12,7 @@
 9. [데이터 정합성](#데이터-정합성)
 10. [시스템 진입점](#시스템-진입점-system-entry-points)
 11. [핵심 이벤트 정의](#핵심-이벤트-정의-core-event-definitions)
+12. [상태 전이 모델](#상태-전이-모델-state-transition-model)
 
 ---
 
@@ -164,8 +165,7 @@ sequenceDiagram
         alt Grace Period (페널티 지불한 앱)
             AppBlockingService->>AppBlockingService: 오버레이 표시 안 함
         else 일반 차단 앱
-            AppBlockingService->>AppBlockingService: 4-6초 대기
-            AppBlockingService->>GuiltyNegotiationOverlay: 오버레이 표시
+            AppBlockingService->>GuiltyNegotiationOverlay: 오버레이 즉시 표시 (지연 없음)
             GuiltyNegotiationOverlay->>User: 강행/철회 선택 대기
             
             alt 강행 선택
@@ -312,7 +312,7 @@ sequenceDiagram
     end
 ```
 
-### 4. 화면 OFF 감지 및 도주 패널티 플로우
+### 4. 화면 OFF/ON 감지 및 도주 패널티 플로우
 
 ```mermaid
 sequenceDiagram
@@ -332,11 +332,20 @@ sequenceDiagram
         PenaltyService->>Database: 현재 포인트 조회 (SUM)
         PenaltyService->>Database: 거래 내역 저장 (PENALTY, -3 WP)
         PenaltyService->>Database: 트랜잭션 커밋
-        AppBlockingService->>GuiltyNegotiationOverlay: hideOverlay(shouldGoHome=true)
-        AppBlockingService->>AppBlockingService: navigateToHome()
-        AppBlockingService->>PointMiningService: resumeMining()
+        AppBlockingService->>GuiltyNegotiationOverlay: hideOverlay(shouldGoHome=false)
+        AppBlockingService->>AppBlockingService: isPendingHomeNavigation = true
+        Note over AppBlockingService: 홈 이동 예약 (화면 ON 시 실행)
     else Case 2: 차단 상태 (오버레이 없음)
+        AppBlockingService->>AppBlockingService: isPendingHomeNavigation = true
+        Note over AppBlockingService: 홈 이동 예약 (화면 ON 시 실행)
+    end
+    
+    Note over System: 화면이 꺼진 상태 유지 (깜빡임 없음)
+    
+    System->>AppBlockingService: ACTION_SCREEN_ON 브로드캐스트
+    alt 홈 이동이 예약된 경우
         AppBlockingService->>AppBlockingService: navigateToHome()
+        AppBlockingService->>AppBlockingService: isPendingHomeNavigation = false
         AppBlockingService->>PointMiningService: resumeMining()
     end
 ```
@@ -385,6 +394,7 @@ sequenceDiagram
   - ViewModel의 StateFlow를 관찰하여 UI 자동 업데이트
   - 포인트: `viewModel.currentPoints` StateFlow 구독
   - 차단 앱 목록: `viewModel.blockedApps` StateFlow 구독
+  - 거래 내역: `viewModel.transactions` StateFlow 구독 (포인트 정산 로그 포함)
 - **경량화**: 데이터베이스 직접 접근 제거, ViewModel을 통한 간접 접근
 
 #### MainViewModel
@@ -395,10 +405,18 @@ sequenceDiagram
 - **StateFlow 관리**:
   - `currentPoints: StateFlow<Int>` - 포인트 합계
   - `blockedApps: StateFlow<List<BlockedApp>>` - 차단 앱 목록
+  - `transactions: StateFlow<List<PointTransaction>>` - 거래 내역 (포인트 정산 로그 포함)
 - **주요 메서드**:
   - `addBlockedApp()`: 차단 앱 추가
   - `removeBlockedApp()`: 차단 앱 제거
   - `getMaxBlockedApps()`: 티어별 최대 앱 개수 반환
+- **티어별 최대 차단 앱 개수**:
+  - `FREE`: 1개
+  - `STANDARD`: 3개
+  - `FAUST_PRO`: 무제한 (Int.MAX_VALUE)
+- **테스트 모드**: `PreferenceManager.setTestModeMaxApps(10)`으로 설정 시 모든 티어에서 최대 10개까지 차단 가능 (실제 휴대폰 테스트용)
+  - 기본값: 테스트 모드 활성화 (최대 10개)
+  - 비활성화: `setTestModeMaxApps(null)` 호출
 
 #### GuiltyNegotiationOverlay
 - **책임**: 시스템 오버레이로 유죄 협상 화면 표시
@@ -1141,17 +1159,23 @@ Foreground Service 시작 (Notification 표시)
 ```
 
 **오디오 감시 로직** (이벤트 기반):
+- **API 레벨 체크**: `AudioPlaybackCallback`은 API 26+에서만 사용 가능 (API 26 미만에서는 감시 비활성화)
 - 서비스 시작 시 `AudioPlaybackCallback` 등록 (이벤트 기반)
+- 콜백 등록 후 초기 오디오 상태 확인:
+  - API 29+: `activePlaybackConfigurations`로 현재 활성 세션 확인
+  - API 26-28: `isMusicActive`로 초기 상태 확인 후 `checkBlockedAppAudio()` 호출
 - 화면 상태(ON/OFF)와 무관하게 지속적으로 작동
 - 오디오 상태 변경 시 즉시 콜백 호출 (`onPlaybackConfigChanged`)
+- 콜백 호출 시 상세 로그 출력: "오디오 콜백 호출: N개 세션 감지"
 - 주의: `AudioPlaybackConfiguration.getClientUid()`는 public API가 아니므로 사용 불가
 - 모든 API 레벨: `AudioManager.isMusicActive`와 `PreferenceManager.getLastMiningApp()`을 사용하여 마지막 앱 정보로 판단
 - 차단 앱에서 오디오 재생이 감지되면 `isPausedByAudio = true` 설정 (상태 분리)
 - 오디오가 꺼지면 `isPausedByAudio = false`로 해제 (양방향 상태 관리)
 - 배터리 소모 최소화: Polling 제거로 CPU Wake Lock 효과 제거 (90% 절감)
 - ANR 방지: 콜백에서 `serviceScope.launch`로 코루틴 전환, DB 접근은 suspend 함수로 처리
-- 메모리 누수 방지: `onDestroy()`에서 `unregisterAudioPlaybackCallback()` 호출 필수
-- 상세한 로그를 통해 디버깅 가능
+- 예외 처리: `startAudioMonitoring()`과 `stopAudioMonitoring()`에서 try-catch로 안전하게 처리
+- 메모리 누수 방지: `onDestroy()`에서 `unregisterAudioPlaybackCallback()` 호출 필수 (API 26+ 체크 포함)
+- 상세한 로그를 통해 디버깅 가능: 콜백 호출, 상태 변경, 초기 상태 확인 등 모든 단계 로깅
 
 **화면 상태 관리**:
 - `ACTION_SCREEN_ON`: 타이머 재개 및 일괄 정산 (`calculateAccumulatedPoints()`)
@@ -1244,7 +1268,7 @@ WeeklyResetReceiver.onReceive()
 
 **처리 로직**:
 - 메모리 캐시(`blockedAppsCache`)에서 차단 여부 확인
-- 차단된 앱인 경우: 4-6초 지연 후 오버레이 표시
+- 차단된 앱인 경우: 즉시 오버레이 표시
 - 차단되지 않은 앱인 경우: 오버레이 숨김
 
 **관련 컴포넌트**:
@@ -1255,26 +1279,25 @@ WeeklyResetReceiver.onReceive()
 
 **위치**: [`AppBlockingService.showOverlay()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
 
-**발생 조건**: `TYPE_WINDOW_STATE_CHANGED` 이벤트에서 패키지명이 추출된 후 발생합니다.
+**발생 조건**: 차단 대상 앱임이 확인되면 즉시 발생합니다. (지연 없음)
 
 **처리 로직**:
-- 메모리 캐시(`blockedAppsCache`)에서 차단 여부 확인
-- 차단된 앱인 경우: 4-6초 지연 후 오버레이 표시
-- 차단되지 않은 앱인 경우: 오버레이 숨김
-
-**관련 컴포넌트**:
-- `AppBlockingService`: 차단 여부 판단
-- `blockedAppsCache`: 메모리 캐시 (HashSet)
-
-**발생 조건**: 차단 대상 앱임이 확인되고 4-6초 지연 시간이 경과한 후 발생합니다.
-
-**처리 로직**:
-- `GuiltyNegotiationOverlay` 인스턴스 생성
+- **중복 오버레이 생성 방지**: `currentOverlay != null` 체크로 이미 활성화된 오버레이가 있으면 즉시 반환
+- `currentBlockedPackage`, `currentBlockedAppName` 설정
+- `GuiltyNegotiationOverlay` 인스턴스 생성 (비동기 실행)
+- **이중 체크**: 비동기 실행 중에 다른 스레드에서 오버레이가 생성되었을 수 있으므로 `currentOverlay == null` 재확인
 - `WindowManager`를 통해 시스템 레벨 오버레이 표시
 - 30초 카운트다운 시작
 
+**중복 방지 메커니즘**:
+- **동기 체크**: 함수 진입 시 `currentOverlay != null`이면 즉시 반환
+- **오버레이 닫기 중 플래그**: `isOverlayDismissing` 플래그로 닫기 중인 경우 새 오버레이 생성 차단
+- **Cool-down 체크**: `showOverlay()` 내부에서도 Cool-down 시간 내인지 확인
+- **비동기 이중 체크**: `serviceScope.launch` 내부에서 `currentOverlay == null && !isOverlayDismissing` 재확인
+- `hideOverlay()`에서 `isOverlayDismissing = true` 설정 후 `currentOverlay = null` 설정하여 경쟁 조건 방지
+
 **관련 컴포넌트**:
-- `AppBlockingService`: 오버레이 트리거
+- `AppBlockingService`: 오버레이 트리거 및 중복 방지
 - `GuiltyNegotiationOverlay`: 오버레이 UI 표시
 - `WindowManager`: 시스템 레벨 오버레이 관리
 
@@ -1391,12 +1414,19 @@ WeeklyResetReceiver.onReceive()
 **발생 조건**: `AudioPlaybackCallback.onPlaybackConfigChanged()`에서 오디오 상태 변경 시 즉시 호출되며, 화면 상태와 무관하게 지속적으로 작동합니다.
 
 **처리 로직**:
+- **초기화**: `startAudioMonitoring()`에서 API 26+ 체크 후 콜백 등록
+- **초기 상태 확인**: 콜백 등록 직후 현재 오디오 상태 확인
+  - API 29+: `activePlaybackConfigurations`로 활성 세션 확인
+  - API 26-28: `isMusicActive`로 확인 후 `checkBlockedAppAudio()` 호출
+- **이벤트 처리**: `onPlaybackConfigChanged()` 콜백에서 "오디오 콜백 호출: N개 세션 감지" 로그 출력
 - 주의: `AudioPlaybackConfiguration.getClientUid()`는 public API가 아니므로 사용 불가
 - 모든 API 레벨: `AudioManager.isMusicActive`로 오디오 재생 상태 확인
 - `PreferenceManager.getLastMiningApp()`으로 마지막 앱 정보 조회
 - 마지막 앱이 차단 목록에 있으면 `true` 반환
 - 차단 앱에서 오디오 재생 중이면 `isPausedByAudio = true` 설정 (상태 분리)
 - 오디오가 꺼지면 `isPausedByAudio = false`로 해제 (양방향 상태 관리)
+- 오디오 종료 시 `PreferenceManager.setAudioBlockedOnScreenOff(false)` 호출하여 화면 OFF 시 기록 리셋
+- **예외 처리**: 모든 단계에서 try-catch로 안전하게 처리
 
 **상태 분리 메커니즘**:
 - `isPausedByApp`: 앱 실행으로 인한 일시정지 (시각적 차단, AppBlockingService가 관리)
@@ -1405,31 +1435,54 @@ WeeklyResetReceiver.onReceive()
 - 시각적 차단 무력화 방지: 오디오가 꺼져도 (`isPausedByAudio = false`) 앱이 실행 중이면 (`isPausedByApp = true`) 채굴 중단 유지
 
 **관련 컴포넌트**:
-- `PointMiningService`: 오디오 모니터링 실행
+- `PointMiningService.startAudioMonitoring()`: 오디오 모니터링 시작 (API 26+ 체크 포함)
+- `PointMiningService.stopAudioMonitoring()`: 오디오 모니터링 중지 (API 26+ 체크 포함)
 - `AudioPlaybackCallback`: 오디오 상태 변경 이벤트 수신 (API 26+)
 - `AudioPlaybackConfiguration`: 활성 오디오 재생 세션 정보 (API 29+)
-- `AudioManager`: 오디오 재생 상태 확인 (API 26-28)
+- `AudioManager.activePlaybackConfigurations`: 현재 활성 오디오 세션 조회 (API 29+)
+- `AudioManager.isMusicActive`: 오디오 재생 상태 확인 (API 26-28에서 초기 상태 확인용)
 - `FaustDatabase`: 차단 앱 목록 조회
 
-#### 8. ACTION_SCREEN_OFF (화면 OFF 감지)
+#### 8. ACTION_SCREEN_OFF/ON (화면 OFF/ON 감지)
 
 **위치**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
 
-**발생 조건**: 사용자가 기기 화면을 끌 때 시스템이 `ACTION_SCREEN_OFF` 브로드캐스트를 전송합니다.
+**발생 조건**: 
+- `ACTION_SCREEN_OFF`: 사용자가 기기 화면을 끌 때 시스템이 브로드캐스트를 전송합니다.
+- `ACTION_SCREEN_ON`: 사용자가 기기 화면을 켤 때 시스템이 브로드캐스트를 전송합니다.
 
-**처리 로직**:
+**핵심 개선사항**: 화면이 꺼질 때 즉시 홈으로 이동하면 시스템의 화면 꺼짐 정책과 충돌하여 깜빡임(Wake-up loop) 현상이 발생합니다. 이를 해결하기 위해 홈 이동을 지연 처리합니다.
+
+**플래그 변수**:
+- `isPendingHomeNavigation`: 화면이 꺼진 동안 홈 이동이 예약되었는지를 추적하는 Boolean 플래그 (기본값: false)
+
+**ACTION_SCREEN_OFF 처리 로직**:
+- **차단 앱 오디오 재생 상태 기록**: 화면 OFF 시점에 차단 앱에서 오디오가 재생 중인지 확인하고 저장
+  - `PointMiningService.isPausedByAudio()` 호출하여 현재 오디오 일시정지 상태 확인
+  - `PreferenceManager.setAudioBlockedOnScreenOff()` 호출하여 상태 저장
+  - 이 기록은 화면 ON 후 허용 앱으로 전환되어도 채굴을 재개하지 않도록 사용됨
 - Case 1: 협상 중(오버레이 표시 중) 화면 OFF → 도주 감지
-  - `PenaltyService.applyQuitPenalty()` 호출하여 철회 패널티 적용
-  - `hideOverlay(shouldGoHome = true)` 호출하여 홈으로 이동
-  - `PointMiningService.resumeMining()` 호출하여 채굴 재개
-- Case 2: 차단 상태(오버레이 없음)에서 화면 OFF → 홈 이동
-  - `navigateToHome()` 호출하여 홈으로 이동
+  - `PenaltyService.applyQuitPenalty()` 호출하여 철회 패널티 적용 (비동기)
+  - `hideOverlay(shouldGoHome = false)` 호출하여 오버레이만 닫기 (홈 이동은 즉시 하지 않음)
+  - `isPendingHomeNavigation = true` 설정하여 홈 이동 예약
+  - 채굴은 이미 pause 상태이므로 유지
+- Case 2: 차단 상태(오버레이 없음)에서 화면 OFF → 홈 이동 예약
+  - `isPendingHomeNavigation = true` 설정하여 홈 이동 예약
+  - 채굴은 이미 pause 상태이므로 유지
+
+**ACTION_SCREEN_ON 처리 로직**:
+- `isPendingHomeNavigation`이 true인지 확인
+- true인 경우:
+  - `navigateToHome("화면 ON 이벤트")` 호출하여 홈으로 이동
+  - `isPendingHomeNavigation = false`로 리셋
   - `PointMiningService.resumeMining()` 호출하여 채굴 재개
 
 **관련 컴포넌트**:
-- `AppBlockingService`: 화면 OFF 이벤트 수신 및 처리
+- `AppBlockingService`: 화면 OFF/ON 이벤트 수신 및 처리
+- `PointMiningService`: 오디오 일시정지 상태 확인 (`isPausedByAudio()`)
+- `PreferenceManager`: 화면 OFF 시 차단 앱 오디오 재생 상태 저장/조회
 - `PenaltyService`: 도주 패널티 적용 (Case 1)
-- `PointMiningService`: 채굴 재개
+- `PointMiningService`: 채굴 재개 (화면 ON 시)
 
 #### 9. 강제 홈 버튼 클릭 호출 시점
 
@@ -1443,49 +1496,102 @@ WeeklyResetReceiver.onReceive()
    - **처리 로직**:
      - `PenaltyService.applyQuitPenalty(packageName, appName)` 호출 (3 WP 차감)
      - `AppBlockingService.hideOverlay(shouldGoHome = true)` 호출
-     - 내부적으로 `navigateToHome("오버레이 종료 요청")` 실행
+     - 내부적으로 `currentBlockedPackage`를 null로 설정하기 전에 로컬 변수에 백업
+     - 오버레이를 먼저 닫고, 150ms 지연 후 `navigateToHome("오버레이 종료 요청", blockedPackageForCoolDown)` 실행
+     - **영상 재생 중 화면 축소 방지**: 오버레이를 먼저 닫고 지연 후 홈 이동하여 전체화면 모드 해제를 방지
+     - **유죄협상 중복 진행 방지**: 
+       - 백업된 패키지 정보로 Cool-down 설정하여 1초간 중복 오버레이 차단
+       - `isOverlayDismissing` 플래그로 오버레이 닫기 중 새 오버레이 생성 차단
+       - `hideOverlay()`에서 `isOverlayDismissing = true` 설정 후 `currentOverlay = null` 설정하여 경쟁 조건 방지
+       - `showOverlay()`에서 `isOverlayDismissing` 체크 및 Cool-down 체크 추가
+       - `showOverlay()`에서 동기 및 비동기 이중 체크로 중복 생성 방지
    - **관련 컴포넌트**:
      - `GuiltyNegotiationOverlay`: 사용자 인터랙션 처리
      - `PenaltyService`: 철회 패널티 적용
      - `AppBlockingService`: 홈 이동 실행
 
-2. **협상 중 화면 OFF (도주 감지)**
-   - **위치**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt:256) - Case 1
+2. **협상 중 화면 OFF (도주 감지) → 화면 ON 시 홈 이동**
+   - **위치**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt:259) - Case 1
    - **발생 조건**: 오버레이가 표시 중인 상태에서 사용자가 기기 화면을 끌 때
-   - **처리 로직**:
+   - **처리 로직 (ACTION_SCREEN_OFF)**:
      - 도주 감지 로그 출력
-     - `PenaltyService.applyQuitPenalty(targetPackage, targetAppName)` 호출 (3 WP 차감)
-     - `hideOverlay(shouldGoHome = true)` 호출
-     - 내부적으로 `navigateToHome("오버레이 종료 요청")` 실행
+     - `PenaltyService.applyQuitPenalty(targetPackage, targetAppName)` 호출 (3 WP 차감, 비동기)
+     - `hideOverlay(shouldGoHome = false)` 호출하여 오버레이만 닫기
+     - `isPendingHomeNavigation = true` 설정하여 홈 이동 예약
+     - 채굴은 이미 pause 상태이므로 유지
+   - **처리 로직 (ACTION_SCREEN_ON)**:
+     - `isPendingHomeNavigation`이 true인지 확인
+     - `navigateToHome("화면 ON 이벤트")` 호출하여 홈으로 이동
+     - `isPendingHomeNavigation = false`로 리셋
      - `PointMiningService.resumeMining()` 호출하여 채굴 재개
    - **관련 컴포넌트**:
-     - `AppBlockingService`: 화면 OFF 이벤트 수신 및 도주 감지
+     - `AppBlockingService`: 화면 OFF/ON 이벤트 수신 및 도주 감지
      - `PenaltyService`: 도주 패널티 적용
-     - `PointMiningService`: 채굴 재개
+     - `PointMiningService`: 채굴 재개 (화면 ON 시)
 
-3. **차단 상태에서 화면 OFF**
-   - **위치**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt:256) - Case 2
+3. **차단 상태에서 화면 OFF → 화면 ON 시 홈 이동**
+   - **위치**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt:259) - Case 2
    - **발생 조건**: 오버레이 없이 차단 상태에서 사용자가 기기 화면을 끌 때
-   - **처리 로직**:
-     - `navigateToHome("차단 상태")` 직접 호출
+   - **처리 로직 (ACTION_SCREEN_OFF)**:
+     - `isPendingHomeNavigation = true` 설정하여 홈 이동 예약
+     - 채굴은 이미 pause 상태이므로 유지
+   - **처리 로직 (ACTION_SCREEN_ON)**:
+     - `isPendingHomeNavigation`이 true인지 확인
+     - `navigateToHome("화면 ON 이벤트")` 호출하여 홈으로 이동
+     - `isPendingHomeNavigation = false`로 리셋
      - `PointMiningService.resumeMining()` 호출하여 채굴 재개
    - **관련 컴포넌트**:
-     - `AppBlockingService`: 화면 OFF 이벤트 수신 및 홈 이동
-     - `PointMiningService`: 채굴 재개
+     - `AppBlockingService`: 화면 OFF/ON 이벤트 수신 및 홈 이동
+     - `PointMiningService`: 채굴 재개 (화면 ON 시)
 
 **홈 이동 구현 방식**:
-- **위치**: [`AppBlockingService.navigateToHome()`](app/src/main/java/com/faust/services/AppBlockingService.kt:227)
+- **위치**: [`AppBlockingService.navigateToHome()`](app/src/main/java/com/faust/services/AppBlockingService.kt:251)
+- **메서드 시그니처**: `navigateToHome(contextLabel: String, blockedPackageForCoolDown: String? = null)`
 - **구현 방식**:
-  1. **Intent 방식**: `Intent.ACTION_MAIN` + `CATEGORY_HOME` 플래그로 홈 화면 Intent 생성 및 실행
-  2. **Global Action 방식**: `performGlobalAction(GLOBAL_ACTION_HOME)` 호출 (AccessibilityService API 활용)
-- **이중 보장**: 두 방식 모두 시도하여 홈 이동 성공률을 높임
-- **에러 처리**: Intent 방식 실패 시에도 Global Action 방식으로 재시도
+  1. **화면 상태 확인**: `PowerManager.isInteractive`를 사용하여 화면이 켜진 상태인지 확인
+  2. **화면 OFF 지연 처리**: 화면이 꺼진 상태면 `isPendingHomeNavigation = true` 설정하고 즉시 실행하지 않음 (ACTION_SCREEN_ON에서 자동 실행)
+  3. **Cool-down 설정**: 파라미터로 전달된 `blockedPackageForCoolDown`이 있으면 우선 사용, 없으면 `currentBlockedPackage` 확인 (폴백 로직)
+  4. **Global Action 방식**: `performGlobalAction(GLOBAL_ACTION_HOME)` 호출 (AccessibilityService API 활용)
+  5. **Intent 방식 제거**: Android 10+ 백그라운드 제한 및 일관성 문제로 인해 제거됨
+- **오버레이 닫기 및 홈 이동 순서**:
+  - **위치**: [`AppBlockingService.hideOverlay()`](app/src/main/java/com/faust/services/AppBlockingService.kt:232)
+  - **중복 오버레이 생성 방지**:
+    - `isOverlayDismissing = true` 플래그 설정으로 닫기 중 상태 표시
+    - `currentOverlay` 참조를 먼저 로컬 변수에 저장하고 즉시 null로 설정하여 `showOverlay()`의 경쟁 조건 방지
+    - 오버레이 닫기 완료 후 100ms 지연하여 플래그 해제 (경쟁 조건 방지)
+  - **상태 관리**: `currentBlockedPackage`를 null로 설정하기 전에 로컬 변수 `blockedPackageForCoolDown`에 백업
+  - **영상 재생 중 화면 축소 방지**: 오버레이를 먼저 닫고, 150ms 지연 후 홈으로 이동
+  - `DELAY_AFTER_OVERLAY_DISMISS_MS = 150L`: 오버레이 닫은 후 홈 이동 지연 시간
+  - 전체화면 모드에서 `performGlobalAction(GLOBAL_ACTION_HOME)` 호출 시 화면 축소 현상을 방지하기 위한 조치
+- **Cool-down 로직 (이중 협상 방지)**:
+  - 홈 이동 시 차단된 앱 패키지명과 시간 저장 (`lastHomeNavigationPackage`, `lastHomeNavigationTime`)
+  - `hideOverlay()`에서 `currentBlockedPackage`를 null로 설정하기 전에 백업하여 `navigateToHome()`에 전달
+  - `navigateToHome()`에서 파라미터로 전달된 패키지 정보로 Cool-down 설정 보장
+  - `handleAppLaunch()`에서 같은 앱이 감지되고 Cool-down 시간(1초) 내면 오버레이 표시 차단
+  - `COOLDOWN_DURATION_MS = 1000L` (1초)
+- **에러 처리**: GlobalAction 실패 시 로그만 남기기
 
 **관련 컴포넌트**:
 - `AppBlockingService`: 홈 이동 로직 구현 및 호출
 - `GuiltyNegotiationOverlay`: 사용자 철회 액션 처리
 - `PenaltyService`: 철회/도주 패널티 적용
 - `PointMiningService`: 채굴 재개
+
+**페널티 시스템 개선사항**:
+- **위치**: [`PenaltyService.applyPenalty()`](app/src/main/java/com/faust/domain/PenaltyService.kt:90)
+- **포인트 음수 방지 정책**: 포인트는 절대 0 미만이 되지 않도록 보장
+  - 모든 포인트 차감 시 현재 포인트를 초과하지 않도록 제한
+  - DB와 UI 모두 0 이상의 값만 저장/표시
+  - 포인트 부족 시 패널티는 현재 포인트까지만 차감
+- **동작 방식**:
+  - 포인트 5 WP일 때 10 WP 패널티 요청 → 실제 차감: 5 WP (현재 포인트로 제한)
+  - 포인트 0 WP일 때 3 WP 패널티 요청 → 차감 불가 (로그만 기록)
+  - 채굴 1 WP 적립 → DB: 1 WP, UI: 1 WP
+- **변경 사항**: 
+  - `PenaltyService.applyPenalty()`: `actualPenalty = penalty.coerceAtMost(currentPoints)` 적용
+  - `PointMiningService.subtractPoints()`: 차감량을 현재 포인트로 제한
+  - 모든 `getTotalPoints()` 호출 시 `.coerceAtLeast(0)` 적용
+  - `MainViewModel.observePoints()`: Flow 수집 시 `coerceAtLeast(0)` 적용
 
 ### C. 데이터 동기화 이벤트 (Data Synchronization Events)
 
@@ -1543,6 +1649,127 @@ WeeklyResetReceiver.onReceive()
 
 ---
 
+## 상태 전이 모델 (State Transition Model)
+
+### 개요
+
+상태 전이 모델은 포인트 채굴 상태를 명확하게 관리하고, 오버레이 중복 발동 문제를 해결하기 위해 도입되었습니다.
+
+### 상태 정의
+
+- **ALLOWED**: 포인트 채굴이 활성화된 상태입니다.
+- **BLOCKED**: 포인트 채굴이 중단된 상태입니다. 제한 앱이 시각적으로 노출되거나, 화면 OFF 상태에서 제한 앱의 오디오가 재생될 때 이 상태가 됩니다.
+
+### 핵심 원칙
+
+1. **오버레이 실행 조건**: 시스템이 'ALLOWED' 상태에서 'BLOCKED' 상태로 변경되는 시점에만 단 1회 실행합니다. 이미 'BLOCKED' 상태인 경우(예: 화면을 다시 켰을 때)에는 오버레이를 다시 띄우지 않습니다.
+
+2. **이벤트 기반 오디오 감지**: `AudioManager.AudioPlaybackCallback`을 사용하여 오디오 상태 변화를 감지합니다. 고정된 주기적 검사 대신, 오디오 세션의 시작/종료 이벤트가 발생할 때만 상태를 업데이트합니다.
+
+3. **채굴 서비스 연동**: 상태가 ALLOWED로 변하면 채굴을 시작하고, BLOCKED로 변하면 즉시 채굴을 중단합니다.
+
+### 상태 전이 흐름
+
+#### 시각적 차단 (앱 실행)
+
+```
+사용자가 제한 앱 실행
+  ↓
+ALLOWED → BLOCKED 전이 감지
+  ↓
+유죄협상 오버레이 표시 (1회만)
+  ↓
+채굴 중단
+```
+
+#### 오디오 차단 (화면 OFF 중 오디오 재생)
+
+```
+화면 OFF 상태에서 제한 앱 오디오 재생
+  ↓
+ALLOWED → BLOCKED 전이 감지
+  ↓
+오버레이 표시 안 함 (화면 OFF 상태이므로)
+  ↓
+채굴 중단
+```
+
+#### 화면 재활성화 시나리오
+
+```
+화면 OFF 상태에서 제한 앱 오디오 재생 중
+  ↓
+상태: BLOCKED 유지
+  ↓
+화면 ON
+  ↓
+BLOCKED → BLOCKED (상태 변경 없음)
+  ↓
+오버레이 중복 표시 방지 ✅
+```
+
+#### 오디오 종료 시나리오
+
+```
+화면 OFF 상태에서 제한 앱 오디오 재생 중
+  ↓
+상태: BLOCKED
+  ↓
+오디오 종료
+  ↓
+BLOCKED → ALLOWED 전이
+  ↓
+채굴 재개
+  ↓
+화면 ON 시 제한 앱이 보이면
+  ↓
+ALLOWED → BLOCKED 전이
+  ↓
+유죄협상 오버레이 정상 작동 ✅
+```
+
+#### 화면 OFF 시 차단 앱 오디오 재생 기록 시나리오
+
+```
+화면 OFF 시점에 차단 앱 오디오 재생 중
+  ↓
+PreferenceManager에 상태 기록 (wasAudioBlockedOnScreenOff = true)
+  ↓
+화면 ON 후 허용 앱으로 전환
+  ↓
+transitionToState(ALLOWED) 호출
+  ↓
+wasAudioBlockedOnScreenOff 확인
+  ↓
+true인 경우: 채굴 재개하지 않음 (return)
+  ↓
+오디오 종료 시
+  ↓
+checkBlockedAppAudioFromConfigs()에서 플래그 리셋
+  ↓
+다음 ALLOWED 전이 시 정상적으로 채굴 재개 ✅
+```
+
+### 구현 위치
+
+- **상태 정의**: [`AppBlockingService.MiningState`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+- **상태 전이 로직**: [`AppBlockingService.transitionToState()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+  - ALLOWED 전이 시 `PreferenceManager.wasAudioBlockedOnScreenOff()` 확인하여 조건부 재개
+- **오디오 상태 변경 처리**: [`AppBlockingService.onAudioBlockStateChanged()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+- **콜백 등록**: [`PointMiningService.setBlockingServiceCallback()`](app/src/main/java/com/faust/services/PointMiningService.kt)
+- **화면 OFF 시 오디오 상태 기록**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
+  - `PointMiningService.isPausedByAudio()` 호출하여 상태 확인
+  - `PreferenceManager.setAudioBlockedOnScreenOff()` 호출하여 상태 저장
+- **오디오 종료 시 플래그 리셋**: [`PointMiningService.checkBlockedAppAudioFromConfigs()`](app/src/main/java/com/faust/services/PointMiningService.kt)
+
+### 관련 컴포넌트
+
+- `AppBlockingService`: 상태 전이 관리 및 오버레이 트리거
+- `PointMiningService`: 오디오 상태 변경 감지 및 콜백 전달
+- `AudioPlaybackCallback`: 오디오 상태 변경 이벤트 수신
+
+---
+
 ## 테스트 전략
 
 ### 단위 테스트 대상
@@ -1566,6 +1793,38 @@ WeeklyResetReceiver.onReceive()
   - 버튼 클릭 시 피드백 정지
   - 헤드셋 탈착 시 피드백 모드 전환
   - Safety Net 로직 (무음 모드, 헤드셋 연결 상태)
+
+---
+
+## 변경 이력 (Architecture Change Log)
+
+### [2024-12-XX] 유죄 협상 오버레이 즉시 호출 변경
+- **작업**: 차단된 앱 실행 시 유죄 협상 오버레이를 즉시 표시하도록 변경
+- **컴포넌트 영향**: `AppBlockingService.transitionToState()`
+- **변경 사항**:
+  - `DELAY_BEFORE_OVERLAY_MS` 상수 제거 (기존: 4-6초 지연)
+  - `overlayDelayJob` 변수 및 관련 로직 제거
+  - `transitionToState()` 메서드에서 오버레이를 즉시 표시하도록 수정
+- **영향 범위**:
+  - 차단된 앱 실행 시 사용자 경험 개선 (즉각적인 피드백)
+  - 기존 로직 보존: Grace Period, Cool-down, 중복 방지 메커니즘 유지
+
+### [2026-01-15] 화면 OFF 시 차단 앱 오디오 재생 상태 기록 및 채굴 재개 방지
+- **작업**: 화면을 끌 때 차단 앱에서 음성이 출력되면 채굴을 중지하고, 이 기록을 보관하여 화면을 켤 때 허용된 앱으로 변경되어도 채굴을 재개하지 않도록 구현
+- **컴포넌트 영향**: 
+  - `PreferenceManager`: 화면 OFF 시 차단 앱 오디오 재생 상태 저장/조회 메서드 추가
+  - `PointMiningService`: `isPausedByAudio()` companion 메서드 추가, 오디오 종료 시 플래그 리셋
+  - `AppBlockingService`: 화면 OFF 시 상태 확인 및 저장, ALLOWED 전이 시 조건부 재개
+- **변경 사항**:
+  - `PreferenceManager`에 `wasAudioBlockedOnScreenOff()`, `setAudioBlockedOnScreenOff()` 메서드 추가
+  - `PointMiningService`에 `isPausedByAudio()` companion 메서드 추가
+  - `AppBlockingService.registerScreenOffReceiver()`에서 화면 OFF 시 `isPausedByAudio` 상태 확인 및 저장
+  - `AppBlockingService.transitionToState()`에서 ALLOWED 전이 시 저장된 상태 확인 후 조건부 재개
+  - `PointMiningService.checkBlockedAppAudioFromConfigs()`에서 오디오 종료 시 플래그 리셋
+- **영향 범위**:
+  - 화면 OFF 시 차단 앱 오디오 재생 중이면 채굴 중지 상태를 기록
+  - 화면 ON 후 허용 앱으로 전환되어도 오디오가 종료될 때까지 채굴 재개하지 않음
+  - 오디오 종료 시 자동으로 플래그가 리셋되어 정상적으로 채굴 재개
 
 ---
 

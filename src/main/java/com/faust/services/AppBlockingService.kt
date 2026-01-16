@@ -37,7 +37,6 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     private var blockedAppsFlowJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private var currentOverlay: GuiltyNegotiationOverlay? = null
-    private var overlayDelayJob: Job? = null
 
     // 차단된 앱 목록을 메모리에 캐싱
     private val blockedAppsCache = ConcurrentHashMap.newKeySet<String>()
@@ -57,6 +56,25 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     // 화면 OFF 감지용 BroadcastReceiver
     private var screenOffReceiver: BroadcastReceiver? = null
 
+    // 오버레이 닫기 중 플래그 (중복 오버레이 생성 방지)
+    @Volatile
+    private var isOverlayDismissing: Boolean = false
+
+    // 쿨다운 메커니즘 (중복 유죄협상 방지)
+    private var lastHomeNavigationPackage: String? = null
+    private var lastHomeNavigationTime: Long = 0L
+    private val COOLDOWN_DURATION_MS = 1000L // 1초
+    private val DELAY_AFTER_OVERLAY_DISMISS_MS = 150L // 오버레이 닫은 후 홈 이동 지연 시간
+
+    // 상태전이 시스템 (State Transition System)
+    enum class MiningState {
+        ALLOWED,  // 포인트 채굴 활성화
+        BLOCKED   // 포인트 채굴 중단
+    }
+    
+    @Volatile
+    private var currentMiningState: MiningState = MiningState.ALLOWED
+
     private val lifecycleRegistry: LifecycleRegistry = LifecycleRegistry(this)
 
     override val lifecycle: Lifecycle
@@ -64,7 +82,6 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
 
     companion object {
         private const val TAG = "AppBlockingService"
-        private val DELAY_BEFORE_OVERLAY_MS = 4000L..6000L // 4-6초 지연
 
         private val IGNORED_PACKAGES = setOf(
             "com.android.systemui",
@@ -99,12 +116,13 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
 
         initializeBlockedAppsCache()
         registerScreenOffReceiver()
+        // 상태전이 시스템: PointMiningService에 콜백 등록
+        PointMiningService.setBlockingServiceCallback(this)
     }
 
     override fun onDestroy() {
         super.onDestroy()
         blockedAppsFlowJob?.cancel()
-        overlayDelayJob?.cancel()
         serviceScope.cancel()
         hideOverlay(shouldGoHome = false)
         blockedAppsCache.clear()
@@ -154,32 +172,19 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         val isBlocked = blockedAppsCache.contains(packageName)
 
         if (isBlocked) {
-            PointMiningService.pauseMining()
-            Log.d(TAG, "Mining Paused: 차단 앱 감지 ($packageName)")
-
-            preferenceManager.setLastMiningApp(packageName)
-
-            if (packageName == lastAllowedPackage) {
-                Log.d(TAG, "Grace Period: 오버레이 표시 안 함")
+            // 쿨다운 체크: 같은 앱이 최근에 홈으로 이동했고 쿨다운 시간 내면 오버레이 표시 차단
+            val currentTime = System.currentTimeMillis()
+            if (packageName == lastHomeNavigationPackage && 
+                (currentTime - lastHomeNavigationTime) < COOLDOWN_DURATION_MS) {
+                Log.d(TAG, "Cool-down 활성: 오버레이 표시 차단 ($packageName)")
                 return
             }
 
-            overlayDelayJob?.cancel()
-            overlayDelayJob = serviceScope.launch {
-                val delay = DELAY_BEFORE_OVERLAY_MS.random()
-                delay(delay)
-
-                if (isActive) {
-                    val appName = getAppName(packageName)
-                    showOverlay(packageName, appName)
-                }
-            }
+            // 상태전이 시스템: ALLOWED → BLOCKED 전이
+            transitionToState(MiningState.BLOCKED, packageName, triggerOverlay = true)
         } else {
-            PointMiningService.resumeMining()
-            Log.d(TAG, "Mining Resumed: 허용 앱으로 전환")
-            preferenceManager.setLastMiningApp(packageName)
-            lastAllowedPackage = null
-            hideOverlay(shouldGoHome = false)
+            // 상태전이 시스템: BLOCKED → ALLOWED 전이
+            transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
         }
     }
 
@@ -188,14 +193,23 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     }
 
     private fun showOverlay(packageName: String, appName: String) {
+        // 동기 체크: 오버레이가 이미 있거나 닫는 중이면 즉시 반환
+        if (currentOverlay != null || isOverlayDismissing) {
+            Log.d(TAG, "오버레이 생성 차단: currentOverlay=${currentOverlay != null}, isOverlayDismissing=$isOverlayDismissing")
+            return
+        }
+
         this.currentBlockedPackage = packageName
         this.currentBlockedAppName = appName
 
         serviceScope.launch(Dispatchers.Main) {
-            if (currentOverlay == null) {
+            // 비동기 이중 체크: 경쟁 조건 방지
+            if (currentOverlay == null && !isOverlayDismissing) {
                 currentOverlay = GuiltyNegotiationOverlay(this@AppBlockingService).apply {
                     show(packageName, appName)
                 }
+            } else {
+                Log.d(TAG, "오버레이 생성 차단 (비동기 체크): currentOverlay=${currentOverlay != null}, isOverlayDismissing=$isOverlayDismissing")
             }
         }
     }
@@ -206,26 +220,45 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
      */
     fun hideOverlay(shouldGoHome: Boolean = false) {
         serviceScope.launch(Dispatchers.Main) {
-            // 1. 홈 이동 요청이 있으면 실행
-            if (shouldGoHome) {
-                navigateToHome("오버레이 종료 요청")
-            }
+            // 1. 닫기 중 플래그 설정 (경쟁 조건 방지)
+            isOverlayDismissing = true
 
-            // 2. 오버레이 닫기 및 참조 제거 (중복 차감 방지 핵심)
+            // 2. 패키지 정보 백업 (쿨다운 설정용)
+            val blockedPackageForCoolDown = currentBlockedPackage
+
+            // 3. 오버레이 닫기 및 참조 제거 (중복 차감 방지 핵심)
             currentOverlay?.dismiss(force = true)
             currentOverlay = null
 
-            // 3. 앱 정보 초기화
+            // 4. 앱 정보 초기화
             currentBlockedPackage = null
             currentBlockedAppName = null
+
+            // 5. 홈 이동 요청이 있으면 지연 후 실행 (영상 재생 중 화면 축소 방지)
+            if (shouldGoHome) {
+                delay(DELAY_AFTER_OVERLAY_DISMISS_MS)
+                navigateToHome("오버레이 종료 요청", blockedPackageForCoolDown)
+            }
+
+            // 6. 닫기 완료 후 플래그 해제 (경쟁 조건 방지)
+            delay(100) // 추가 안전 지연
+            isOverlayDismissing = false
         }
     }
 
     /**
      * [핵심 수정] 홈 화면 이동 로직을 클래스 멤버 함수로 분리 (공용 사용)
      */
-    fun navigateToHome(contextLabel: String) {
+    fun navigateToHome(contextLabel: String, blockedPackageForCoolDown: String? = null) {
         Log.d(TAG, "홈 이동 실행 ($contextLabel)")
+
+        // 쿨다운 설정: 파라미터로 전달된 패키지 정보 우선 사용, 없으면 currentBlockedPackage 확인
+        val packageForCoolDown = blockedPackageForCoolDown ?: currentBlockedPackage
+        if (packageForCoolDown != null) {
+            lastHomeNavigationPackage = packageForCoolDown
+            lastHomeNavigationTime = System.currentTimeMillis()
+            Log.d(TAG, "쿨다운 설정: $packageForCoolDown (${COOLDOWN_DURATION_MS}ms)")
+        }
 
         // 1. Intent 방식 시도
         val homeIntent = Intent(Intent.ACTION_MAIN).apply {
@@ -243,6 +276,74 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         performGlobalAction(GLOBAL_ACTION_HOME)
     }
 
+    /**
+     * [상태전이 시스템] 상태 전이 로직
+     * ALLOWED → BLOCKED 전이 시에만 오버레이 표시 (중복 방지)
+     */
+    private fun transitionToState(newState: MiningState, packageName: String, triggerOverlay: Boolean) {
+        val previousState = currentMiningState
+        
+        // 상태 변경이 없으면 아무것도 하지 않음 (중복 오버레이 방지)
+        if (previousState == newState) {
+            Log.d(TAG, "상태 전이 스킵: $previousState → $newState (변경 없음)")
+            return
+        }
+        
+        Log.d(TAG, "상태 전이: $previousState → $newState ($packageName)")
+        currentMiningState = newState
+        
+        when (newState) {
+            MiningState.ALLOWED -> {
+                // 화면 OFF 시 차단 앱 오디오 재생 중이었는지 확인
+                val wasAudioBlockedOnScreenOff = preferenceManager.wasAudioBlockedOnScreenOff()
+                if (wasAudioBlockedOnScreenOff) {
+                    Log.d(TAG, "화면 OFF 시 차단 앱 오디오 재생 기록 존재: 채굴 재개하지 않음")
+                    // 플래그는 오디오 종료 시에만 리셋됨 (PointMiningService에서 처리)
+                    return
+                }
+                
+                PointMiningService.resumeMining()
+                Log.d(TAG, "Mining Resumed: 허용 앱으로 전환")
+                preferenceManager.setLastMiningApp(packageName)
+                lastAllowedPackage = null
+                hideOverlay(shouldGoHome = false)
+            }
+            MiningState.BLOCKED -> {
+                PointMiningService.pauseMining()
+                Log.d(TAG, "Mining Paused: 차단 앱 감지 ($packageName)")
+                preferenceManager.setLastMiningApp(packageName)
+                
+                // Grace Period 체크
+                if (packageName == lastAllowedPackage) {
+                    Log.d(TAG, "Grace Period: 오버레이 표시 안 함")
+                    return
+                }
+                
+                // 오버레이는 ALLOWED → BLOCKED 전이 시에만 즉시 표시
+                if (triggerOverlay && previousState == MiningState.ALLOWED) {
+                    serviceScope.launch {
+                        val appName = getAppName(packageName)
+                        showOverlay(packageName, appName)
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * [상태전이 시스템] 오디오 상태 변경 처리
+     * PointMiningService에서 오디오 상태 변경 시 호출됨
+     */
+    fun onAudioBlockStateChanged(isBlocked: Boolean) {
+        if (isBlocked) {
+            // 오디오 차단 감지: ALLOWED → BLOCKED 전이
+            transitionToState(MiningState.BLOCKED, "audio", triggerOverlay = false)
+        } else {
+            // 오디오 종료: BLOCKED → ALLOWED 전이
+            transitionToState(MiningState.ALLOWED, "audio", triggerOverlay = false)
+        }
+    }
+
     private suspend fun getAppName(packageName: String): String {
         return try {
             val pm = packageManager
@@ -257,6 +358,17 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         screenOffReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 if (intent?.action == Intent.ACTION_SCREEN_OFF) {
+                    // 화면 OFF 시 차단 앱 오디오 재생 상태 확인 및 저장
+                    // 오디오 상태 변경 콜백이 이미 호출되어 isPausedByAudio 상태가 업데이트되었을 수 있음
+                    Log.d(TAG, "[화면 OFF] 차단 앱 오디오 재생 상태 확인 시작")
+                    val isPausedByAudio = PointMiningService.isPausedByAudio()
+                    Log.d(TAG, "[화면 OFF] 오디오 상태 확인 결과: isPausedByAudio=$isPausedByAudio")
+                    preferenceManager.setAudioBlockedOnScreenOff(isPausedByAudio)
+                    if (isPausedByAudio) {
+                        Log.d(TAG, "[화면 OFF] 차단 앱 오디오 재생 중: 채굴 중지 상태 기록")
+                    } else {
+                        Log.d(TAG, "[화면 OFF] 차단 앱 오디오 재생 중 아님: 상태 기록 (false)")
+                    }
 
                     // Case 1: 협상 중(오버레이 뜸)에 화면 끔 -> 도주 감지
                     if (currentOverlay != null) {
@@ -283,7 +395,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                     // Case 2: 오버레이 없이 차단 상태 -> 그냥 홈 이동
                     else if (PointMiningService.isMiningPaused()) {
                         Log.d(TAG, "차단 상태(오버레이 없음)에서 화면 OFF -> 홈 이동")
-                        navigateToHome("차단 상태")
+                        navigateToHome("차단 상태", null)
                         PointMiningService.resumeMining()
                     }
                 }
