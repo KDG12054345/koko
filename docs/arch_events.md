@@ -377,11 +377,16 @@ sequenceDiagram
 - `PenaltyService.applyQuitPenalty(packageName, appName)` 호출
 - Free/Standard 티어: 3 WP 차감
 - `AppBlockingService.hideOverlay(shouldGoHome = true)` 호출하여 오버레이 닫기 및 홈으로 이동
+- **홈 런처 감지**: `handleAppLaunch()`에서 홈 런처 패키지가 감지되면 상태를 `ALLOWED`로 전이
+  - 서비스 시작 시 `initializeHomeLauncherPackages()`로 홈 런처 패키지 목록 초기화
+  - `PackageManager.queryIntentActivities()`로 `CATEGORY_HOME` Intent를 처리할 수 있는 모든 앱을 찾아 저장
+  - `onAccessibilityEvent()`에서 홈 런처 패키지는 className 필터링을 우회하여 Flow로 전송 보장
+  - 홈 화면 이벤트가 실제로 발생했을 때만 상태를 `ALLOWED`로 전이하여 중복 호출 방지
 
 **관련 컴포넌트**:
 - `GuiltyNegotiationOverlay`: 사용자 인터랙션 처리
 - `PenaltyService`: 페널티 계산 및 적용 (3 WP 차감)
-- `AppBlockingService`: 오버레이 닫기 및 홈 이동
+- `AppBlockingService`: 오버레이 닫기, 홈 이동, 강제 상태 초기화
 
 #### 3. executePersonaFeedback (Persona 피드백 실행)
 

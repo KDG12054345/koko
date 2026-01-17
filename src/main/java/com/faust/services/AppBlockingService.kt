@@ -6,6 +6,8 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.content.pm.ResolveInfo
 import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
@@ -19,8 +21,22 @@ import com.faust.domain.PenaltyService
 import com.faust.presentation.view.GuiltyNegotiationOverlay
 import com.faust.presentation.view.OverlayDismissCallback
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.channels.BufferOverflow
 import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * 앱 실행 이벤트 데이터 클래스
+ */
+data class AppLaunchEvent(
+    val windowId: Int,
+    val packageName: String,
+    val timestamp: Long = System.currentTimeMillis()
+)
 
 /**
  * [시스템 진입점: 시스템 이벤트 진입점]
@@ -41,6 +57,9 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
 
     // 차단된 앱 목록을 메모리에 캐싱
     private val blockedAppsCache = ConcurrentHashMap.newKeySet<String>()
+
+    // 홈 런처 패키지 목록 (CATEGORY_HOME Intent를 처리할 수 있는 앱들)
+    private val homeLauncherPackages = ConcurrentHashMap.newKeySet<String>()
 
     // 페널티를 지불한 앱을 기억하는 변수 (Grace Period)
     private var lastAllowedPackage: String? = null
@@ -77,8 +96,19 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     // Window ID 기반 중복 호출 방지 메커니즘
     private var lastWindowId: Int = -1
     private var lastProcessedPackage: String? = null
-    private var pendingLaunchJob: Job? = null
     private val THROTTLE_DELAY_MS = 300L // Throttling 지연 시간 (300ms)
+    
+    // Flow 기반 이벤트 처리 인프라
+    private val appLaunchEvents = MutableSharedFlow<AppLaunchEvent>(
+        replay = 0,
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST
+    )
+    private var appLaunchFlowJob: Job? = null
+    
+    // 현재 활성 앱 추적 (정합성 체크용)
+    @Volatile
+    private var latestActivePackage: String? = null
 
     // 상태전이 시스템 (State Transition System)
     enum class MiningState {
@@ -141,17 +171,22 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         lifecycleRegistry.currentState = Lifecycle.State.STARTED
 
         initializeBlockedAppsCache()
+        initializeHomeLauncherPackages()
         registerScreenOffReceiver()
         // 상태전이 시스템: PointMiningService에 콜백 등록
         PointMiningService.setBlockingServiceCallback(this)
+        // Flow 기반 이벤트 수집 시작
+        startAppLaunchFlow()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         blockedAppsFlowJob?.cancel()
+        appLaunchFlowJob?.cancel()
         serviceScope.cancel()
         hideOverlay(shouldGoHome = false)
         blockedAppsCache.clear()
+        homeLauncherPackages.clear()
         unregisterScreenOffReceiver()
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
     }
@@ -174,58 +209,156 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         }
     }
 
+    /**
+     * 홈 런처 패키지 목록 초기화
+     * CATEGORY_HOME Intent를 처리할 수 있는 모든 앱을 찾아서 저장
+     */
+    private fun initializeHomeLauncherPackages() {
+        try {
+            val homeIntent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+            }
+            val resolveInfos: List<ResolveInfo> = packageManager.queryIntentActivities(
+                homeIntent,
+                PackageManager.MATCH_DEFAULT_ONLY
+            )
+            homeLauncherPackages.clear()
+            homeLauncherPackages.addAll(resolveInfos.mapNotNull { it.activityInfo?.packageName })
+            Log.d(TAG, "홈 런처 패키지 초기화 완료: ${homeLauncherPackages.size}개 (${homeLauncherPackages.joinToString()})")
+        } catch (e: Exception) {
+            Log.e(TAG, "홈 런처 패키지 초기화 실패", e)
+            homeLauncherPackages.clear()
+        }
+    }
+    
+    /**
+     * Flow 기반 앱 실행 이벤트 수집 시작
+     */
+    private fun startAppLaunchFlow() {
+        appLaunchFlowJob?.cancel()
+        appLaunchFlowJob = serviceScope.launch {
+            appLaunchEvents
+                .debounce(THROTTLE_DELAY_MS)
+                .catch { e -> 
+                    // 에러 핸들링: 스트림이 끊기지 않도록 로그만 남기고 계속 진행
+                    Log.e(TAG, "Flow 수집 중 예외 발생", e)
+                }
+                .collectLatest { event ->
+                    // collectLatest 사용: 이전 작업 취소하고 최신 이벤트만 처리
+                    // 빠른 앱 전환 시나리오에서 반응성 향상
+                    
+                    // ===== 정합성 체크 1: overlayState 체크 (distinctUntilChanged 대체) =====
+                    if (overlayState != OverlayState.IDLE) {
+                        Log.d(TAG, "오버레이 활성 상태: 무시 (event=$event, overlayState=$overlayState)")
+                        return@collectLatest
+                    }
+                    
+                    // ===== 정합성 체크 2: latestActivePackage 불일치 체크 =====
+                    // debounce 지연 중 사용자가 다른 앱으로 이동했다가 돌아온 경우 대응
+                    // 단, 홈 런처에서 다른 앱으로 전환하는 경우는 허용 (빠른 앱 실행 시나리오 대응)
+                    val isFromHomeLauncher = latestActivePackage != null && latestActivePackage in homeLauncherPackages
+                    if (latestActivePackage != event.packageName && !isFromHomeLauncher) {
+                        Log.d(TAG, "패키지 불일치: 무시 (expected=$latestActivePackage, actual=${event.packageName})")
+                        return@collectLatest
+                    }
+                    
+                    // ===== 정합성 체크 3: currentOverlay null 체크 =====
+                    if (currentOverlay != null) {
+                        Log.d(TAG, "오버레이 이미 표시 중: 무시 (currentOverlay=$currentOverlay)")
+                        return@collectLatest
+                    }
+                    
+                    // ===== 모든 체크 통과: handleAppLaunch 호출 =====
+                    handleAppLaunch(event.packageName)
+                    
+                    // ===== 실제 처리 후: lastProcessedPackage 업데이트 =====
+                    // ⚠️ 중요: 실제 처리 후에만 업데이트 (다음 Window ID 검사용)
+                    lastProcessedPackage = event.packageName
+                }
+        }
+    }
+
     override fun onAccessibilityEvent(event: AccessibilityEvent) {
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             val windowId = event.windowId
             val packageName = event.packageName?.toString()
             val className = event.className?.toString()
             
-            // Window ID 검사: 같은 창이면 무시 (화면 내부 변화)
-            // 단, Window ID가 -1(UNDEFINED)인 경우는 특별 처리:
-            // - 오버레이가 닫혔으면 (IDLE 상태) 기억이 리셋되어 있으므로 처리 허용
-            // - 오버레이가 활성 상태면 중복으로 간주하여 무시
+            // ===== 필터링 1: IGNORED_PACKAGES 체크 (최우선) =====
+            if (packageName != null && packageName in IGNORED_PACKAGES) {
+                Log.d(TAG, "IGNORED_PACKAGES: 무시 (package=$packageName)")
+                return  // Flow로 보내지 않음
+            }
+            
+            // ===== 필터링 2: className 필터링 (Layout/View 제외 - 무한 디바운스 방지 핵심) =====
+            // ⚠️ 중요: Layout/View를 제외하여 노이즈 이벤트를 사전 차단
+            // Layout/View는 매우 빈번하게 발생하여 debounce 타이머를 계속 리셋시킬 수 있음
+            // className이 null인 경우는 보수적으로 허용 (일부 시스템 이벤트 처리)
+            // 홈 런처 패키지는 className 필터링을 우회 (홈 화면 감지 보장)
+            val isHomeLauncher = packageName != null && packageName in homeLauncherPackages
+            val isValidClass = isHomeLauncher || className == null || (
+                className.contains("Activity") ||
+                className.contains("Dialog") ||
+                className.contains("Fragment")
+            )
+            
+            // Layout, ViewGroup, View 등은 제외 (무한 디바운스 방지)
+            // 단, 홈 런처는 예외로 허용 (홈 화면 감지 보장)
+            if (!isValidClass) {
+                Log.d(TAG, "Activity/Dialog/Fragment 아님 (Layout/View 제외): 무시 (className=$className, package=$packageName)")
+                return  // Flow로 보내지 않음
+            }
+            
+            // ===== 필터링 3: Window ID 검사 (중복 이벤트 사전 차단) =====
+            // 오버레이가 닫힌 후(IDLE)에는 같은 앱 재실행 허용 (반복 실행 시나리오 대응)
+            // 기존 방어막(Grace Period, Cool-down)이 handleAppLaunch()에서 작동하여 중복 호출 방지
             if (windowId != -1) {
-                // Window ID가 유효한 경우: 기존 로직 사용
-                if (windowId == lastWindowId && packageName == lastProcessedPackage) {
-                    Log.d(TAG, "Window ID 중복: 무시 (windowId=$windowId, package=$packageName)")
-                    return
+                // Window ID가 유효한 경우: 같은 창이면 무시
+                // 단, 오버레이가 닫힌 후(IDLE)에는 같은 앱 재실행 허용
+                if (windowId == lastWindowId && packageName == lastProcessedPackage && overlayState != OverlayState.IDLE) {
+                    Log.d(TAG, "Window ID 중복: 무시 (windowId=$windowId, package=$packageName, overlayState=$overlayState)")
+                    return  // Flow로 보내지 않음
                 }
             } else {
                 // Window ID가 -1인 경우: 오버레이 상태 확인
-                // 오버레이가 닫혔으면 (IDLE 상태) 기억이 리셋되어 있으므로 처리 허용
-                // 오버레이가 활성 상태면 중복으로 간주
-                if (overlayState != OverlayState.IDLE && 
-                    packageName == lastProcessedPackage) {
+                if (overlayState != OverlayState.IDLE && packageName == lastProcessedPackage) {
                     Log.d(TAG, "Window ID -1 중복: 무시 (package=$packageName, overlayState=$overlayState)")
-                    return
+                    return  // Flow로 보내지 않음
                 }
             }
             
-            // 클래스 이름 검증: Layout은 항상 허용
-            // Window ID 검사와 오버레이 상태 체크로 이미 중복 방지하고 있으므로
-            // className 필터는 더 관대하게 처리 (유튜브 등 FrameLayout 이벤트 처리)
-            val isValidClass = className?.contains("Activity") == true ||
-                              className?.contains("Dialog") == true ||
-                              className?.contains("Fragment") == true ||
-                              className?.contains("Layout") == true ||  // FrameLayout, LinearLayout 등 항상 허용
-                              className == null
-            
-            if (!isValidClass) {
-                Log.d(TAG, "Activity/Dialog/Fragment/Layout 아님: 무시 (className=$className, windowId=$windowId)")
-                return
+            // ===== 필터링 4: 오버레이 상태 체크 =====
+            if (overlayState != OverlayState.IDLE) {
+                Log.d(TAG, "오버레이 활성 상태: 무시 (overlayState=$overlayState)")
+                return  // Flow로 보내지 않음
             }
             
+            // ===== 모든 필터링 통과: Flow로 이벤트 전송 =====
             if (packageName != null) {
-                // Throttling: 이전 작업 취소하고 새 작업 예약
-                pendingLaunchJob?.cancel()
-                pendingLaunchJob = serviceScope.launch(Dispatchers.Main) {
-                    delay(THROTTLE_DELAY_MS)
-                    handleAppLaunch(packageName)
-                    lastProcessedPackage = packageName
+                // latestActivePackage 업데이트 (Flow로 보내기 전)
+                // ⚠️ 중요: 이 값은 "현재 활성 앱"을 추적하며, debounce 후 collectLatest에서
+                // 이 값과 비교하여 사용자가 이미 다른 앱으로 이동했는지 검출함
+                // debounce 지연 중 빠른 앱 전환 시나리오에서 정합성 체크에 사용됨
+                latestActivePackage = packageName
+                
+                // Flow로 이벤트 전송
+                // ⚠️ 중요: onAccessibilityEvent()는 suspend 함수가 아니므로 tryEmit() 사용
+                // emit()은 suspend 함수이므로 코루틴 스코프 내에서만 사용 가능
+                val launchEvent = AppLaunchEvent(
+                    windowId = windowId,
+                    packageName = packageName,
+                    timestamp = System.currentTimeMillis()
+                )
+                
+                // tryEmit()은 즉시 반환되며, 버퍼가 가득 차면 false 반환 (DROP_OLDEST 정책으로 자동 처리)
+                if (!appLaunchEvents.tryEmit(launchEvent)) {
+                    Log.w(TAG, "Flow 버퍼 가득 참: 이벤트 유실 (package=$packageName)")
                 }
+                
+                // lastWindowId 업데이트 (다음 이벤트 검사용)
+                // ⚠️ 주의: lastProcessedPackage는 collectLatest 블록에서 실제 처리 후에만 업데이트
+                lastWindowId = windowId
             }
-            
-            lastWindowId = windowId
         }
     }
 
@@ -247,11 +380,18 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         // 2. 무시할 패키지 체크
         if (packageName in IGNORED_PACKAGES) return
 
-        // 3. 차단 앱 여부 확인
+        // 3. 홈 런처 감지: 홈 화면으로 이동한 경우 상태를 ALLOWED로 전이
+        if (packageName in homeLauncherPackages) {
+            Log.d(TAG, "홈 런처 감지: 상태를 ALLOWED로 전이 ($packageName)")
+            transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
+            return
+        }
+
+        // 4. 차단 앱 여부 확인
         val isBlocked = blockedAppsCache.contains(packageName)
 
         if (isBlocked) {
-            // 4. Grace Period 체크: 강행 버튼을 눌러 페널티를 지불한 앱은 중복 징벌 방지
+            // 5. Grace Period 체크: 강행 버튼을 눌러 페널티를 지불한 앱은 중복 징벌 방지
             if (packageName == lastAllowedPackage) {
                 Log.d(TAG, "Grace Period 활성: 중복 징벌 방지 - 오버레이 표시 차단 ($packageName)")
             // Grace Period가 활성화된 경우에도 채굴은 중단해야 함 (상태 전이는 수행)
@@ -260,21 +400,21 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             return
             }
             
-            // 5. 쿨다운 체크: 같은 앱이 최근에 홈으로 이동했고 쿨다운 시간 내면 오버레이 표시 차단
+            // 6. 쿨다운 체크: 같은 앱이 최근에 홈으로 이동했고 쿨다운 시간 내면 오버레이 표시 차단
             if (packageName == lastHomeNavigationPackage && 
                 (currentTime - lastHomeNavigationTime) < COOLDOWN_DURATION_MS) {
                 Log.d(TAG, "Cool-down 활성: 오버레이 표시 차단 ($packageName)")
                 return
             }
 
-            // 6. 중복 호출 방지: Window ID + Throttling이 주 방어선이므로 여기서는 보조 체크만
+            // 7. 중복 호출 방지: Window ID + Throttling이 주 방어선이므로 여기서는 보조 체크만
             // (Window ID 검사와 Throttling으로 대부분 차단되지만, 추가 안전장치로 유지)
             // 주의: 이 로직은 Window ID 검사와 Throttling 이후에 실행되므로 거의 실행되지 않음
 
-            // 7. 상태전이 시스템: ALLOWED → BLOCKED 전이
+            // 8. 상태전이 시스템: ALLOWED → BLOCKED 전이
             transitionToState(MiningState.BLOCKED, packageName, triggerOverlay = true)
         } else {
-            // 8. 상태전이 시스템: BLOCKED → ALLOWED 전이
+            // 9. 상태전이 시스템: BLOCKED → ALLOWED 전이
             // 허용 앱은 Window ID + Throttling으로 충분히 필터링됨
             transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
         }
@@ -383,6 +523,8 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                 if (shouldGoHome) {
                     delay(DELAY_AFTER_OVERLAY_DISMISS_MS)
                     navigateToHome("오버레이 종료 요청", blockedPackageForCoolDown, applyCooldown)
+                    // 강제 상태 초기화 제거: 홈 화면 이벤트가 실제로 발생했을 때만 상태 전이
+                    // TYPE_WINDOW_STATE_CHANGED 이벤트에서 홈 런처 패키지가 감지되면 handleAppLaunch()에서 자동으로 ALLOWED로 전이됨
                 }
                 
                 // 상태는 이미 IDLE이므로 추가 전이 불필요
