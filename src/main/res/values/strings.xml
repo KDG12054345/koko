@@ -26,6 +26,8 @@
     <string name="persona_prompt_street_2">Manifest that win, then go claim that W. No cap</string>
     <string name="persona_prompt_calm">잠깐, 이게 정말 필요한 행동인가요?</string>
     <string name="persona_prompt_diplomatic">다시 한 번 생각해보세요</string>
+    <string name="persona_prompt_comfortable_1_kim">이 앱을 닫고 나면, 당신에게 더 소중한 시간이 기다리고 있을 거예요.</string>
+    <string name="persona_prompt_comfortable_2_kim">잠시 숨을 고르고, 정말 지금 확인해야 하는 일인지 생각해보세요.</string>
     
     <!-- 서비스 알림 -->
     <string name="notification_channel_app_blocking">앱 차단</string>
@@ -78,4 +80,18 @@
     <!-- 플레이스홀더 (레이아웃용) -->
     <string name="app_name_placeholder">App Name</string>
     <string name="package_name_placeholder">com.example.app</string>
+    
+    <!-- 페르소나 선택 -->
+    <string name="persona_selection">페르소나 선택</string>
+    <string name="persona_street_name">Street</string>
+    <string name="persona_street_description">불규칙 자극: 빠르고 강렬한 피드백</string>
+    <string name="persona_calm_name">Calm</string>
+    <string name="persona_calm_description">부드러운 성찰: 느리고 차분한 피드백</string>
+    <string name="persona_diplomatic_name">Diplomatic</string>
+    <string name="persona_diplomatic_description">규칙적 압박: 일정한 리듬의 피드백</string>
+    <string name="persona_comfortable_name">Comfortable</string>
+    <string name="persona_comfortable_description">편안한 위로: 부드럽고 편안한 피드백</string>
+    <string name="persona_unregister">등록 해제</string>
+    <string name="persona_unregister_description">랜덤 텍스트 사용</string>
+    <string name="persona_selected">%1$s 페르소나가 선택되었습니다</string>
 </resources>

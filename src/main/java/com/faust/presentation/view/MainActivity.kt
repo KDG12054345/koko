@@ -21,10 +21,12 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import com.faust.R
+import com.faust.data.utils.PreferenceManager
 import com.faust.domain.WeeklyResetService
 import com.faust.models.BlockedApp
 import com.faust.presentation.view.AppSelectionDialog
 import com.faust.presentation.view.BlockedAppAdapter
+import com.faust.presentation.view.PersonaSelectionDialog
 import com.faust.presentation.viewmodel.MainViewModel
 import com.faust.services.AppBlockingService
 import com.faust.services.PointMiningService
@@ -47,10 +49,15 @@ class MainActivity : AppCompatActivity() {
     private lateinit var adapter: BlockedAppAdapter
     private lateinit var textCurrentPoints: TextView
     private lateinit var buttonAddApp: Button
+    private lateinit var buttonPersona: Button
     private lateinit var fabStartService: FloatingActionButton
     
     private val prefs: SharedPreferences by lazy {
         getSharedPreferences("faust_alarm_prefs", Context.MODE_PRIVATE)
+    }
+    
+    private val preferenceManager: PreferenceManager by lazy {
+        PreferenceManager(this)
     }
     
     private companion object {
@@ -142,10 +149,15 @@ class MainActivity : AppCompatActivity() {
     private fun setupViews() {
         textCurrentPoints = findViewById(R.id.textCurrentPoints)
         buttonAddApp = findViewById(R.id.buttonAddApp)
+        buttonPersona = findViewById(R.id.buttonPersona)
         fabStartService = findViewById(R.id.fabStartService)
 
         buttonAddApp.setOnClickListener {
             showAddAppDialog()
+        }
+
+        buttonPersona.setOnClickListener {
+            showPersonaDialog()
         }
 
         fabStartService.setOnClickListener {
@@ -232,6 +244,19 @@ class MainActivity : AppCompatActivity() {
             }
             .setNegativeButton(getString(R.string.cancel), null)
             .show()
+    }
+
+    private fun showPersonaDialog() {
+        val dialog = PersonaSelectionDialog(preferenceManager) { personaTypeString ->
+            if (personaTypeString != null) {
+                preferenceManager.setPersonaType(personaTypeString)
+                Toast.makeText(this, getString(R.string.persona_selected, personaTypeString), Toast.LENGTH_SHORT).show()
+            } else {
+                preferenceManager.setPersonaType("")
+                Toast.makeText(this, getString(R.string.persona_unregister), Toast.LENGTH_SHORT).show()
+            }
+        }
+        dialog.show(supportFragmentManager, "PersonaSelectionDialog")
     }
 
     /**

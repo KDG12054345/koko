@@ -103,7 +103,8 @@ class PointMiningService : LifecycleService() {
         fun pauseMining() {
             instance?.let {
                 it.isPausedByApp = true
-                Log.d(TAG, "Mining paused via external signal (app blocking)")
+                Log.d(TAG, "[채굴 중단] 앱 차단으로 인한 일시정지")
+                Log.d(TAG, "[채굴 상태] isPausedByApp=${it.isPausedByApp}, isPausedByAudio=${it.isPausedByAudio}, isMiningPaused=${it.isMiningPaused}")
             }
         }
         
@@ -114,7 +115,8 @@ class PointMiningService : LifecycleService() {
         fun resumeMining() {
             instance?.let {
                 it.isPausedByApp = false
-                Log.d(TAG, "Mining resumed via external signal (app blocking released)")
+                Log.d(TAG, "[채굴 재개] 앱 차단 해제로 인한 재개")
+                Log.d(TAG, "[채굴 상태] isPausedByApp=${it.isPausedByApp}, isPausedByAudio=${it.isPausedByAudio}, isMiningPaused=${it.isMiningPaused}")
             }
         }
         
@@ -455,11 +457,20 @@ class PointMiningService : LifecycleService() {
      * 오디오 모니터링 - 이벤트 기반
      * AudioPlaybackCallback에서 호출됩니다.
      * 
+     * 오디오 상태가 변경되었을 때 한 번만 검사하고, 검사 결과를 저장하여 포인트 채굴 여부를 결정합니다.
+     * 주기적 검사가 아닌 이벤트 기반으로 작동하여 배터리 소모를 최소화합니다.
+     * 
      * @param configs 현재 활성 오디오 재생 세션 목록
      */
     private suspend fun checkBlockedAppAudioFromConfigs(configs: List<AudioPlaybackConfiguration>) {
         try {
             Log.d(TAG, "[오디오 검사] 시작: 세션 수=${configs.size}, isMusicActive=${audioManager.isMusicActive}, 현재 상태: isPausedByAudio=$isPausedByAudio")
+            
+            // 오버레이가 표시 중이면 PersonaEngine의 오디오 재생일 가능성이 높으므로 검사 건너뛰기
+            if (AppBlockingService.isOverlayActive()) {
+                Log.d(TAG, "[오디오 검사] 오버레이 표시 중: PersonaEngine 오디오 재생으로 추정되어 검사 건너뜀")
+                return
+            }
             
             // 활성 세션이 없으면 오디오 종료로 판단
             // 주의: PLAYER_STATE_STARTED는 @SystemApi이므로 공개 API가 아닙니다.
@@ -472,7 +483,8 @@ class PointMiningService : LifecycleService() {
                 if (isPausedByAudio) {
                     Log.d(TAG, "[오디오 검사] 오디오 종료 감지: 차단 앱 오디오 재생 중단")
                     isPausedByAudio = false
-                    Log.d(TAG, "차단 앱 오디오 종료: 포인트 채굴 재개")
+                    Log.w(TAG, "[채굴 재개] 차단 앱 오디오 종료로 인한 재개")
+                    Log.d(TAG, "[채굴 상태] isPausedByApp=$isPausedByApp, isPausedByAudio=$isPausedByAudio, isMiningPaused=$isMiningPaused")
                     // 화면 OFF 시 차단 앱 오디오 재생 기록 리셋
                     preferenceManager.setAudioBlockedOnScreenOff(false)
                     Log.d(TAG, "화면 OFF 시 차단 앱 오디오 재생 기록 리셋")
@@ -493,14 +505,16 @@ class PointMiningService : LifecycleService() {
                 // 차단 앱에서 오디오 재생 중이면 포인트 채굴 일시정지
                 Log.d(TAG, "[오디오 검사] 차단 앱 오디오 감지: 일시정지 상태로 전환")
                 isPausedByAudio = true
-                Log.w(TAG, "차단 앱 오디오 감지: 포인트 채굴 일시정지")
+                Log.w(TAG, "[채굴 중단] 차단 앱 오디오 감지로 인한 일시정지")
+                Log.d(TAG, "[채굴 상태] isPausedByApp=$isPausedByApp, isPausedByAudio=$isPausedByAudio, isMiningPaused=$isMiningPaused")
                 // 상태전이 시스템: 콜백 호출
                 blockingServiceCallback?.invoke(true)
             } else if (!hasBlockedAppAudio && isPausedByAudio) {
                 // 오디오 종료 감지
                 Log.d(TAG, "[오디오 검사] 차단 앱 오디오 종료: 재개 상태로 전환")
                 isPausedByAudio = false
-                Log.d(TAG, "차단 앱 오디오 종료: 포인트 채굴 재개")
+                Log.w(TAG, "[채굴 재개] 차단 앱 오디오 종료로 인한 재개")
+                Log.d(TAG, "[채굴 상태] isPausedByApp=$isPausedByApp, isPausedByAudio=$isPausedByAudio, isMiningPaused=$isMiningPaused")
                 // 화면 OFF 시 차단 앱 오디오 재생 기록 리셋
                 preferenceManager.setAudioBlockedOnScreenOff(false)
                 Log.d(TAG, "화면 OFF 시 차단 앱 오디오 재생 기록 리셋")
