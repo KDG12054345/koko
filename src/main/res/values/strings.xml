@@ -94,4 +94,36 @@
     <string name="persona_unregister">등록 해제</string>
     <string name="persona_unregister_description">랜덤 텍스트 사용</string>
     <string name="persona_selected">%1$s 페르소나가 선택되었습니다</string>
+    
+    <!-- 상점 -->
+    <string name="shop_title">상점</string>
+    <string name="inventory">인벤토리</string>
+    <string name="purchase">구매</string>
+    <string name="use">사용</string>
+    <string name="item_dopamine_shot">도파민 샷</string>
+    <string name="item_dopamine_shot_description">SNS 앱을 20분간 허용합니다</string>
+    <string name="item_standard_ticket">스탠다드 티켓</string>
+    <string name="item_standard_ticket_description">SNS 제외 전체 앱을 1시간 동안 허용합니다</string>
+    <string name="item_cinema_pass">시네마 패스</string>
+    <string name="item_cinema_pass_description">OTT 앱을 4시간 동안 허용합니다</string>
+    <string name="item_price">가격: %1$d WP</string>
+    <string name="item_quantity">보유: %1$d개</string>
+    <string name="item_cooldown">쿨타임: %1$s</string>
+    <string name="purchase_success">구매 완료</string>
+    <string name="purchase_failed">구매 실패: %1$s</string>
+    <string name="use_success">사용 완료</string>
+    <string name="use_failed">사용 실패: %1$s</string>
+    <string name="insufficient_points">포인트가 부족합니다</string>
+    <string name="cooldown_remaining">쿨타임이 남아있습니다</string>
+    <string name="inventory_full">인벤토리가 가득 찼습니다</string>
+    
+    <!-- 설정 -->
+    <string name="settings_title">설정</string>
+    <string name="custom_reset_time_title">나의 하루가 끝나는 시간</string>
+    <string name="custom_reset_time_description">하루가 끝나는 시간을 설정하세요. 예: 새벽 2시를 설정하면 오늘 02:00 ~ 다음 날 01:59가 하루로 간주됩니다.</string>
+    <string name="current_reset_time">현재 설정: %1$s</string>
+    <string name="select_time">시간 선택</string>
+    <string name="reset_time_updated">리셋 시간이 %1$s로 변경되었습니다</string>
+    <string name="reset_time_update_failed">리셋 시간 변경에 실패했습니다</string>
+    <string name="home">홈</string>
 </resources>

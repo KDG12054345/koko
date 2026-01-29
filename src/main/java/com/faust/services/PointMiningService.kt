@@ -83,11 +83,24 @@ class PointMiningService : LifecycleService() {
         }
 
         fun startService(context: Context) {
+            // 이미 실행 중인 서비스가 있으면 재시작하지 않음
+            if (instance != null) {
+                Log.d(TAG, "startService() 호출: 서비스가 이미 실행 중 (재시작 스킵)")
+                return
+            }
+            
+            Log.d(TAG, "startService() 호출: 새 서비스 시작")
             val intent = Intent(context, PointMiningService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                    Log.d(TAG, "startForegroundService() 호출 완료")
+                } else {
+                    context.startService(intent)
+                    Log.d(TAG, "startService() 호출 완료")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "서비스 시작 실패", e)
             }
         }
 
@@ -176,11 +189,13 @@ class PointMiningService : LifecycleService() {
 
     override fun onCreate() {
         super.onCreate()
+        Log.d(TAG, "onCreate() 호출: 서비스 인스턴스 생성")
         instance = this
         createNotificationChannel()
         // Foreground Service 시작 (앱이 종료되어도 죽지 않음)
         startForeground(NOTIFICATION_ID, createNotification())
         preferenceManager.setServiceRunning(true)
+        Log.d(TAG, "Foreground Service 시작 완료: Notification 표시")
         
         // 화면 이벤트 리시버 등록
         registerScreenEventReceiver()
@@ -189,12 +204,19 @@ class PointMiningService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         
-        Log.d(TAG, "Mining Service Started")
+        Log.d(TAG, "Mining Service Started (startId=$startId, flags=$flags)")
         
         // 실제 화면 상태 확인 및 초기화
         checkAndUpdateScreenState()
         
-        startMiningJob()
+        // 이미 실행 중인 job이 있으면 재시작하지 않음 (중복 방지)
+        if (miningJob?.isActive == true) {
+            Log.d(TAG, "Mining Job이 이미 실행 중: 재시작 스킵 (기존 job 유지)")
+        } else {
+            Log.d(TAG, "Mining Job 시작: 새 코루틴 생성")
+            startMiningJob()
+        }
+        
         // 오디오 모니터링 시작 (화면 상태와 무관하게 지속 실행)
         startAudioMonitoring()
         return START_STICKY
@@ -202,13 +224,16 @@ class PointMiningService : LifecycleService() {
 
     override fun onDestroy() {
         super.onDestroy()
+        Log.d(TAG, "onDestroy() 호출: 서비스 종료 시작")
         instance = null
         miningJob?.cancel()
+        Log.d(TAG, "Mining Job 취소 완료")
         serviceScope.cancel()
+        Log.d(TAG, "ServiceScope 취소 완료")
         stopAudioMonitoring()  // 오디오 콜백 해제
         unregisterScreenEventReceiver()
         preferenceManager.setServiceRunning(false)
-        Log.d(TAG, "Mining Service Stopped")
+        Log.d(TAG, "Mining Service Stopped: 모든 리소스 정리 완료")
     }
 
     override fun onBind(intent: Intent): IBinder? {
@@ -247,20 +272,31 @@ class PointMiningService : LifecycleService() {
      */
     private fun startMiningJob() {
         miningJob?.cancel()
+        Log.d(TAG, "startMiningJob() 호출: 기존 job 취소 후 새 job 시작")
         miningJob = serviceScope.launch {
+            Log.d(TAG, "Mining 코루틴 시작: isActive=$isActive, isScreenOn=$isScreenOn, isMiningPaused=$isMiningPaused")
+            var iterationCount = 0
             while (isActive) {
                 try {
+                    iterationCount++
+                    Log.d(TAG, "Mining 루프 반복 시작: iteration=$iterationCount, 1분 대기 시작...")
                     delay(60_000L) // 1분 대기
+                    Log.d(TAG, "Mining 루프: 1분 경과, 상태 확인 시작 (isScreenOn=$isScreenOn, isMiningPaused=$isMiningPaused)")
                     if (isScreenOn && !isMiningPaused) {
+                        Log.d(TAG, "Mining 루프: 조건 충족, 포인트 적립 시작")
                         addMiningPoints(1)
                         Log.d(TAG, "포인트 적립: 1 WP (화면: ${if (isScreenOn) "ON" else "OFF"}, 일시정지: $isMiningPaused)")
                     } else {
                         Log.d(TAG, "포인트 적립 스킵 (화면: ${if (isScreenOn) "ON" else "OFF"}, 일시정지: $isMiningPaused)")
                     }
+                } catch (e: CancellationException) {
+                    Log.d(TAG, "Mining 코루틴 취소됨: iteration=$iterationCount")
+                    throw e
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error in mining loop", e)
+                    Log.e(TAG, "Error in mining loop: iteration=$iterationCount", e)
                 }
             }
+            Log.d(TAG, "Mining 코루틴 종료: isActive=$isActive, iteration=$iterationCount")
         }
         Log.d(TAG, "Mining Job Started (화면: ${if (isScreenOn) "ON" else "OFF"}, 일시정지: $isMiningPaused)")
     }

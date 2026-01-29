@@ -18,10 +18,16 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.appcompat.app.AppCompatActivity
+import androidx.fragment.app.Fragment
+import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.viewpager2.adapter.FragmentStateAdapter
+import androidx.viewpager2.widget.ViewPager2
 import com.faust.R
 import com.faust.data.utils.PreferenceManager
+import com.faust.domain.AppGroupService
+import com.faust.domain.DailyResetService
 import com.faust.domain.WeeklyResetService
 import com.faust.models.BlockedApp
 import com.faust.presentation.view.AppSelectionDialog
@@ -31,6 +37,8 @@ import com.faust.presentation.viewmodel.MainViewModel
 import com.faust.services.AppBlockingService
 import com.faust.services.PointMiningService
 import com.google.android.material.floatingactionbutton.FloatingActionButton
+import com.google.android.material.tabs.TabLayout
+import com.google.android.material.tabs.TabLayoutMediator
 import kotlinx.coroutines.launch
 
 /**
@@ -45,11 +53,8 @@ import kotlinx.coroutines.launch
 class MainActivity : AppCompatActivity() {
     private val viewModel: MainViewModel by viewModels()
 
-    private lateinit var recyclerView: androidx.recyclerview.widget.RecyclerView
-    private lateinit var adapter: BlockedAppAdapter
-    private lateinit var textCurrentPoints: TextView
-    private lateinit var buttonAddApp: Button
-    private lateinit var buttonPersona: Button
+    private lateinit var viewPager: ViewPager2
+    private lateinit var tabLayout: TabLayout
     private lateinit var fabStartService: FloatingActionButton
     
     private val prefs: SharedPreferences by lazy {
@@ -107,14 +112,13 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         setupToolbar()
+        setupViewPager()
         setupViews()
-        setupRecyclerView()
         
         // 앱 시작 시 권한 확인
         checkPermissionsOnStart()
         
         checkPermissions()
-        observeViewModel()
         
         // 주간 정산 스케줄링
         if (!hasAlarmPermissionError()) {
@@ -131,6 +135,23 @@ class MainActivity : AppCompatActivity() {
         } else {
             Log.w(TAG, "Skipping weekly reset scheduling: alarm permission error occurred previously")
         }
+
+        // 일일 초기화 스케줄링
+        try {
+            DailyResetService.scheduleDailyReset(this)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to schedule daily reset", e)
+        }
+
+        // 앱 그룹 초기화 (앱 첫 실행 시)
+        lifecycleScope.launch {
+            try {
+                val appGroupService = AppGroupService(this@MainActivity)
+                appGroupService.initializeDefaultGroups()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to initialize app groups", e)
+            }
+        }
     }
 
     private fun setupToolbar() {
@@ -146,19 +167,25 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun setupViewPager() {
+        viewPager = findViewById(R.id.viewPager)
+        tabLayout = findViewById(R.id.tabLayout)
+
+        val adapter = MainPagerAdapter(this)
+        viewPager.adapter = adapter
+
+        TabLayoutMediator(tabLayout, viewPager) { tab, position ->
+            tab.text = when (position) {
+                0 -> getString(R.string.app_name) // "Faust" 또는 "홈"
+                1 -> getString(R.string.shop_title)
+                2 -> getString(R.string.settings_title)
+                else -> null
+            }
+        }.attach()
+    }
+
     private fun setupViews() {
-        textCurrentPoints = findViewById(R.id.textCurrentPoints)
-        buttonAddApp = findViewById(R.id.buttonAddApp)
-        buttonPersona = findViewById(R.id.buttonPersona)
         fabStartService = findViewById(R.id.fabStartService)
-
-        buttonAddApp.setOnClickListener {
-            showAddAppDialog()
-        }
-
-        buttonPersona.setOnClickListener {
-            showPersonaDialog()
-        }
 
         fabStartService.setOnClickListener {
             if (checkAllPermissions()) {
@@ -167,104 +194,6 @@ class MainActivity : AppCompatActivity() {
                 checkPermissions()
             }
         }
-
-    }
-
-    /**
-     * ViewModel의 StateFlow를 관찰하여 UI를 업데이트합니다.
-     */
-    private fun observeViewModel() {
-        // 포인트 관찰
-        lifecycleScope.launch {
-            viewModel.currentPoints.collect { points ->
-                updatePointsDisplay(points)
-            }
-        }
-
-        // 차단 앱 목록 관찰 (adapter가 초기화된 후에만 실행)
-        lifecycleScope.launch {
-            viewModel.blockedApps.collect { apps ->
-                if (::adapter.isInitialized) {
-                    adapter.submitList(apps)
-                }
-            }
-        }
-    }
-
-    private fun setupRecyclerView() {
-        recyclerView = findViewById(R.id.recyclerViewBlockedApps)
-        adapter = BlockedAppAdapter { blockedApp ->
-            removeBlockedApp(blockedApp)
-        }
-        recyclerView.layoutManager = LinearLayoutManager(this)
-        recyclerView.adapter = adapter
-    }
-
-    private fun showAddAppDialog() {
-        lifecycleScope.launch {
-            val maxApps = viewModel.getMaxBlockedApps()
-            val currentCount = viewModel.getCurrentBlockedAppCount()
-            
-            if (currentCount >= maxApps) {
-                Toast.makeText(
-                    this@MainActivity,
-                    getString(R.string.max_apps_limit, maxApps),
-                    Toast.LENGTH_SHORT
-                ).show()
-                return@launch
-            }
-
-            val dialog = AppSelectionDialog { app ->
-                addBlockedApp(app)
-            }
-            dialog.show(supportFragmentManager, "AppSelectionDialog")
-        }
-    }
-
-    private fun addBlockedApp(app: BlockedApp) {
-        lifecycleScope.launch {
-            val success = viewModel.addBlockedApp(app)
-            if (success) {
-                Toast.makeText(this@MainActivity, getString(R.string.app_added, app.appName), Toast.LENGTH_SHORT).show()
-            } else {
-                Toast.makeText(this@MainActivity, getString(R.string.add_failed), Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    private fun removeBlockedApp(app: BlockedApp) {
-        AlertDialog.Builder(this)
-            .setTitle(getString(R.string.remove_app_title))
-            .setMessage(getString(R.string.remove_app_message, app.appName))
-            .setPositiveButton(getString(R.string.remove)) { _, _ ->
-                lifecycleScope.launch {
-                    viewModel.removeBlockedApp(app)
-                    Toast.makeText(this@MainActivity, getString(R.string.app_removed, app.appName), Toast.LENGTH_SHORT).show()
-                }
-            }
-            .setNegativeButton(getString(R.string.cancel), null)
-            .show()
-    }
-
-    private fun showPersonaDialog() {
-        val dialog = PersonaSelectionDialog(preferenceManager) { personaTypeString ->
-            if (personaTypeString != null) {
-                preferenceManager.setPersonaType(personaTypeString)
-                Toast.makeText(this, getString(R.string.persona_selected, personaTypeString), Toast.LENGTH_SHORT).show()
-            } else {
-                preferenceManager.setPersonaType("")
-                Toast.makeText(this, getString(R.string.persona_unregister), Toast.LENGTH_SHORT).show()
-            }
-        }
-        dialog.show(supportFragmentManager, "PersonaSelectionDialog")
-    }
-
-    /**
-     * 포인트 표시를 업데이트합니다.
-     * @param points 표시할 포인트 값
-     */
-    private fun updatePointsDisplay(points: Int) {
-        textCurrentPoints.text = getString(R.string.current_points, points)
     }
 
     private fun checkPermissions() {
@@ -490,5 +419,21 @@ class MainActivity : AppCompatActivity() {
      */
     private fun clearAlarmPermissionError() {
         prefs.edit().putBoolean(KEY_ALARM_PERMISSION_ERROR, false).apply()
+    }
+}
+
+/**
+ * ViewPager2 어댑터
+ */
+class MainPagerAdapter(fragmentActivity: FragmentActivity) : FragmentStateAdapter(fragmentActivity) {
+    override fun getItemCount(): Int = 3
+
+    override fun createFragment(position: Int): Fragment {
+        return when (position) {
+            0 -> MainFragment()
+            1 -> ShopFragment()
+            2 -> SettingsFragment()
+            else -> throw IllegalArgumentException("Invalid position: $position")
+        }
     }
 }

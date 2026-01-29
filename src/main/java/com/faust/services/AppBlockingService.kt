@@ -17,7 +17,10 @@ import androidx.lifecycle.LifecycleRegistry
 import com.faust.FaustApplication
 import com.faust.data.database.FaustDatabase
 import com.faust.data.utils.PreferenceManager
+import com.faust.domain.ActivePassService
+import com.faust.domain.AppGroupService
 import com.faust.domain.PenaltyService
+import com.faust.models.AppGroupType
 import com.faust.presentation.view.GuiltyNegotiationOverlay
 import com.faust.presentation.view.OverlayDismissCallback
 import kotlinx.coroutines.*
@@ -53,6 +56,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     }
     private var blockedAppsFlowJob: Job? = null
     private val serviceScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    @Volatile
     private var currentOverlay: GuiltyNegotiationOverlay? = null
 
     // 차단된 앱 목록을 메모리에 캐싱
@@ -62,6 +66,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     private val homeLauncherPackages = ConcurrentHashMap.newKeySet<String>()
 
     // 페널티를 지불한 앱을 기억하는 변수 (Grace Period)
+    @Volatile
     private var lastAllowedPackage: String? = null
 
     // PenaltyService 인스턴스
@@ -69,8 +74,20 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         PenaltyService(this)
     }
 
+    // ActivePassService 인스턴스
+    private val activePassService: ActivePassService by lazy {
+        ActivePassService(this)
+    }
+
+    // AppGroupService 인스턴스
+    private val appGroupService: AppGroupService by lazy {
+        AppGroupService(this)
+    }
+
     // 현재 협상 중인 앱 정보 저장용
+    @Volatile
     private var currentBlockedPackage: String? = null
+    @Volatile
     private var currentBlockedAppName: String? = null
 
     // 화면 OFF 감지용 BroadcastReceiver
@@ -87,14 +104,19 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     private var overlayState: OverlayState = OverlayState.IDLE
 
     // 쿨다운 메커니즘 (중복 유죄협상 방지)
+    @Volatile
     private var lastHomeNavigationPackage: String? = null
+    @Volatile
     private var lastHomeNavigationTime: Long = 0L
     private val COOLDOWN_DURATION_MS = 1000L // 1초
     private val DELAY_AFTER_OVERLAY_DISMISS_MS = 150L // 오버레이 닫은 후 홈 이동 지연 시간
     private val DELAY_AFTER_PERSONA_AUDIO_STOP_MS = 150L // PersonaEngine 오디오 정지 완료 대기 시간 (오디오 콜백 지연 고려)
+    private val HOME_LAUNCHER_DETECTION_TIMEOUT_MS = 500L // 홈 런처 감지 타임아웃 (백업 메커니즘)
 
     // Window ID 기반 중복 호출 방지 메커니즘
+    @Volatile
     private var lastWindowId: Int = -1
+    @Volatile
     private var lastProcessedPackage: String? = null
     private val THROTTLE_DELAY_MS = 300L // Throttling 지연 시간 (300ms)
     
@@ -269,7 +291,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                     }
                     
                     // ===== 모든 체크 통과: handleAppLaunch 호출 =====
-                    handleAppLaunch(event.packageName)
+                    handleAppLaunch(event.packageName) // suspend 함수로 변경됨
                     
                     // ===== 실제 처리 후: lastProcessedPackage 업데이트 =====
                     // ⚠️ 중요: 실제 처리 후에만 업데이트 (다음 Window ID 검사용)
@@ -287,6 +309,13 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             // ===== 필터링 1: IGNORED_PACKAGES 체크 (최우선) =====
             if (packageName != null && packageName in IGNORED_PACKAGES) {
                 Log.d(TAG, "IGNORED_PACKAGES: 무시 (package=$packageName)")
+                return  // Flow로 보내지 않음
+            }
+            
+            // ===== 필터링 1.5: 오버레이 패키지의 FrameLayout 이벤트 필터링 =====
+            // 오버레이가 표시된 후 FrameLayout 이벤트가 Flow로 전송되어 불필요한 체크 발생 방지
+            if (packageName == "com.faust" && className != null && className.contains("FrameLayout")) {
+                Log.d(TAG, "오버레이 FrameLayout 이벤트: 무시 (package=$packageName, className=$className)")
                 return  // Flow로 보내지 않음
             }
             
@@ -366,7 +395,7 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
         lastAllowedPackage = packageName
     }
 
-    private fun handleAppLaunch(packageName: String) {
+    private suspend fun handleAppLaunch(packageName: String) {
         val currentTime = System.currentTimeMillis()
 
         // 1. 오버레이 상태 체크: 상태 머신 기반 (최우선 체크)
@@ -399,12 +428,54 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
             transitionToState(MiningState.BLOCKED, packageName, triggerOverlay = false)
             return
             }
+
+            // 5.5. 프리 패스 활성화 체크: 활성 패스가 있고 해당 앱이 허용 그룹에 속하면 차단 해제
+            try {
+                // SNS 앱 그룹 확인 (도파민 샷)
+                val isSnsApp = appGroupService.isAppInGroup(packageName, AppGroupType.SNS)
+                if (isSnsApp) {
+                    val isDopamineShotActive = activePassService.isPassActiveForGroup(AppGroupType.SNS)
+                    if (isDopamineShotActive) {
+                        Log.d(TAG, "도파민 샷 활성: SNS 앱 차단 해제 ($packageName)")
+                        transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
+                        return
+                    }
+                }
+
+                // OTT 앱 그룹 확인 (시네마 패스)
+                val isOttApp = appGroupService.isAppInGroup(packageName, AppGroupType.OTT)
+                if (isOttApp) {
+                    val isCinemaPassActive = activePassService.isPassActiveForGroup(AppGroupType.OTT)
+                    if (isCinemaPassActive) {
+                        Log.d(TAG, "시네마 패스 활성: OTT 앱 차단 해제 ($packageName)")
+                        transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
+                        return
+                    }
+                }
+
+                // 스탠다드 티켓 확인 (SNS 제외 전체 앱)
+                if (!isSnsApp) {
+                    val isStandardTicketActive = activePassService.isStandardTicketActive()
+                    if (isStandardTicketActive) {
+                        Log.d(TAG, "스탠다드 티켓 활성: 전체 앱 차단 해제 ($packageName)")
+                        transitionToState(MiningState.ALLOWED, packageName, triggerOverlay = false)
+                        return
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error checking free pass for $packageName", e)
+                // 에러 발생 시 계속 진행 (오버레이 표시)
+            }
             
             // 6. 쿨다운 체크: 같은 앱이 최근에 홈으로 이동했고 쿨다운 시간 내면 오버레이 표시 차단
             if (packageName == lastHomeNavigationPackage && 
                 (currentTime - lastHomeNavigationTime) < COOLDOWN_DURATION_MS) {
-                Log.d(TAG, "Cool-down 활성: 오버레이 표시 차단 ($packageName)")
+                val elapsedTime = currentTime - lastHomeNavigationTime
+                Log.d(TAG, "Cool-down 활성: 오버레이 표시 차단 ($packageName, 경과 시간=${elapsedTime}ms, 쿨다운=${COOLDOWN_DURATION_MS}ms)")
                 return
+            } else if (packageName == lastHomeNavigationPackage) {
+                val elapsedTime = currentTime - lastHomeNavigationTime
+                Log.d(TAG, "Cool-down 만료: 오버레이 표시 허용 ($packageName, 경과 시간=${elapsedTime}ms, 쿨다운=${COOLDOWN_DURATION_MS}ms)")
             }
 
             // 7. 중복 호출 방지: Window ID + Throttling이 주 방어선이므로 여기서는 보조 체크만
@@ -523,8 +594,19 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                 if (shouldGoHome) {
                     delay(DELAY_AFTER_OVERLAY_DISMISS_MS)
                     navigateToHome("오버레이 종료 요청", blockedPackageForCoolDown, applyCooldown)
-                    // 강제 상태 초기화 제거: 홈 화면 이벤트가 실제로 발생했을 때만 상태 전이
-                    // TYPE_WINDOW_STATE_CHANGED 이벤트에서 홈 런처 패키지가 감지되면 handleAppLaunch()에서 자동으로 ALLOWED로 전이됨
+                    
+                    // 홈 이동 후 상태 전이 보장 메커니즘 (백업)
+                    // 홈 런처 이벤트가 발생하지 않거나 지연되는 경우를 대비한 타임아웃 기반 전이
+                    delay(HOME_LAUNCHER_DETECTION_TIMEOUT_MS)
+                    
+                    // 홈 런처가 감지되지 않았으면 강제로 ALLOWED 상태로 전이
+                    // 이렇게 하면 다시 차단 앱 실행 시 정상적으로 유죄협상 진행됨
+                    if (currentMiningState == MiningState.BLOCKED) {
+                        Log.w(TAG, "홈 런처 감지 타임아웃: 강제로 ALLOWED 상태로 전이 (다음 실행 시 유죄협상 보장)")
+                        transitionToState(MiningState.ALLOWED, "home", triggerOverlay = false)
+                    } else {
+                        Log.d(TAG, "홈 런처 감지 완료 또는 이미 ALLOWED 상태: 상태 전이 불필요 (현재 상태: $currentMiningState)")
+                    }
                 }
                 
                 // 상태는 이미 IDLE이므로 추가 전이 불필요
@@ -559,7 +641,11 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                 Log.d(TAG, "쿨다운 설정: $packageForCoolDown (${COOLDOWN_DURATION_MS}ms)")
             }
         } else {
-            Log.d(TAG, "쿨다운 면제: 철회 버튼 클릭으로 인한 홈 이동")
+            // 쿨다운 면제: 철회 버튼 클릭으로 인한 홈 이동
+            // 쿨다운 변수 리셋하여 재실행 시 오버레이 표시 보장
+            lastHomeNavigationPackage = null
+            lastHomeNavigationTime = 0L
+            Log.d(TAG, "쿨다운 면제: 철회 버튼 클릭으로 인한 홈 이동 (쿨다운 변수 리셋)")
         }
 
         // 1. Intent 방식 시도
@@ -581,21 +667,28 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
     /**
      * [상태전이 시스템] 상태 전이 로직
      * ALLOWED → BLOCKED 전이 시에만 오버레이 표시 (중복 방지)
+     * [수정 2026-01-18] 상태가 같아도 오버레이가 없고 조건을 만족하면 오버레이 표시
      */
     private fun transitionToState(newState: MiningState, packageName: String, triggerOverlay: Boolean) {
         val previousState = currentMiningState
         
-        // 상태 변경이 없으면 아무것도 하지 않음 (중복 오버레이 방지)
-        if (previousState == newState) {
-            Log.d(TAG, "상태 전이 스킵: $previousState → $newState (변경 없음)")
-            return
-        }
+        // 상태 변경이 없으면 채굴 상태만 업데이트하고 오버레이 체크는 별도로 수행
+        val isStateChanged = previousState != newState
         
-        Log.d(TAG, "상태 전이: $previousState → $newState ($packageName)")
-        currentMiningState = newState
+        if (isStateChanged) {
+            Log.d(TAG, "상태 전이: $previousState → $newState ($packageName)")
+            currentMiningState = newState
+        } else {
+            Log.d(TAG, "상태 전이 스킵: $previousState → $newState (변경 없음)")
+        }
         
         when (newState) {
             MiningState.ALLOWED -> {
+                if (!isStateChanged) {
+                    // 상태 변경이 없으면 ALLOWED 처리 스킵
+                    return
+                }
+                
                 // 화면 OFF 시 차단 앱 오디오 재생 중이었는지 확인
                 val wasAudioBlockedOnScreenOff = preferenceManager.wasAudioBlockedOnScreenOff()
                 if (wasAudioBlockedOnScreenOff) {
@@ -612,10 +705,13 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                 hideOverlay(shouldGoHome = false)
             }
             MiningState.BLOCKED -> {
-                Log.d(TAG, "[상태 전이] BLOCKED → pauseMining() 호출")
-                PointMiningService.pauseMining()
-                Log.d(TAG, "Mining Paused: 차단 앱 감지 ($packageName)")
-                preferenceManager.setLastMiningApp(packageName)
+                // 상태 변경이 있으면 채굴 중단 처리
+                if (isStateChanged) {
+                    Log.d(TAG, "[상태 전이] BLOCKED → pauseMining() 호출")
+                    PointMiningService.pauseMining()
+                    Log.d(TAG, "Mining Paused: 차단 앱 감지 ($packageName)")
+                    preferenceManager.setLastMiningApp(packageName)
+                }
                 
                 // Grace Period 체크
                 if (packageName == lastAllowedPackage) {
@@ -623,12 +719,23 @@ class AppBlockingService : AccessibilityService(), LifecycleOwner {
                     return
                 }
                 
-                // 오버레이는 ALLOWED → BLOCKED 전이 시에만 즉시 표시
-                if (triggerOverlay && previousState == MiningState.ALLOWED) {
+                // 오버레이 표시 조건:
+                // 1. triggerOverlay가 true이고
+                // 2. ALLOWED → BLOCKED 전이인 경우만 오버레이 표시
+                //    (상태 변경이 없으면 이미 처리된 상태이므로 오버레이 표시하지 않음 - hideOverlay() 직후 중복 표시 방지)
+                // 3. 오버레이가 현재 표시되지 않은 경우
+                val shouldShowOverlay = triggerOverlay && 
+                    isStateChanged && previousState == MiningState.ALLOWED &&  // 상태 변경이 있어야 함
+                    currentOverlay == null && overlayState == OverlayState.IDLE
+                
+                if (shouldShowOverlay) {
+                    Log.d(TAG, "오버레이 표시 조건 충족: triggerOverlay=$triggerOverlay, isStateChanged=$isStateChanged, previousState=$previousState, currentOverlay=${currentOverlay != null}")
                     serviceScope.launch {
                         val appName = getAppName(packageName)
                         showOverlay(packageName, appName)
                     }
+                } else {
+                    Log.d(TAG, "오버레이 표시 조건 불충족: triggerOverlay=$triggerOverlay, isStateChanged=$isStateChanged, previousState=$previousState, currentOverlay=${currentOverlay != null}, overlayState=$overlayState")
                 }
             }
         }

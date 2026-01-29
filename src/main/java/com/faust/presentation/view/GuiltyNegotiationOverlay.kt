@@ -265,8 +265,13 @@ class GuiltyNegotiationOverlay(
         isUserActionCompleted = true
 
         coroutineScope.launch {
-            // 페널티 적용
-            penaltyService.applyQuitPenalty(packageName, appName)
+            // 페널티 적용 및 결과 확인
+            val penaltyApplied = penaltyService.applyQuitPenalty(packageName, appName)
+            
+            // 패널티 적용 실패 시 로깅 (Grace Period는 적용하지 않음)
+            if (!penaltyApplied) {
+                Log.w(TAG, "패널티 적용 실패: 포인트 부족 또는 오류 발생 ($packageName)")
+            }
 
             // [핵심] 서비스에게 오버레이 닫기 및 홈 이동 요청
             // shouldGoHome = true -> 강제로 홈으로 튕겨냄

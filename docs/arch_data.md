@@ -13,6 +13,9 @@ Data Layer는 데이터 영속성과 저장소 관리를 담당합니다. Room D
 ```mermaid
 erDiagram
     BlockedApp ||--o{ PointTransaction : "triggers"
+    FreePassItem ||--o{ PointTransaction : "purchases"
+    DailyUsageRecord ||--o{ FreePassItem : "tracks"
+    AppGroup ||--o{ FreePassItem : "groups"
     
     BlockedApp {
         string packageName PK
@@ -26,6 +29,24 @@ erDiagram
         TransactionType type
         long timestamp
         string reason
+    }
+    
+    FreePassItem {
+        FreePassItemType itemType PK
+        int quantity
+        long lastPurchaseTime
+        long lastUseTime
+    }
+    
+    DailyUsageRecord {
+        string date PK
+        int standardTicketUsedCount
+    }
+    
+    AppGroup {
+        string packageName PK
+        AppGroupType groupType PK
+        boolean isIncluded
     }
     
     UserTier {
@@ -51,9 +72,33 @@ erDiagram
 |--------|------|----------|------|
 | id | Long | PRIMARY KEY, AUTO_INCREMENT | 거래 ID |
 | amount | Int | NOT NULL | 포인트 양 (음수 가능) |
-| type | TransactionType | NOT NULL | 거래 타입 (MINING, PENALTY, RESET) |
+| type | TransactionType | NOT NULL | 거래 타입 (MINING, PENALTY, PURCHASE, RESET) |
 | timestamp | Long | NOT NULL | 거래 시간 |
 | reason | String | | 거래 사유 |
+
+#### free_pass_items
+
+| 컬럼명 | 타입 | 제약조건 | 설명 |
+|--------|------|----------|------|
+| itemType | FreePassItemType | PRIMARY KEY | 아이템 타입 (DOPAMINE_SHOT, STANDARD_TICKET, CINEMA_PASS) |
+| quantity | Int | NOT NULL, DEFAULT 0 | 보유 수량 |
+| lastPurchaseTime | Long | NOT NULL, DEFAULT 0 | 마지막 구매 시간 (timestamp) |
+| lastUseTime | Long | NOT NULL, DEFAULT 0 | 마지막 사용 시간 (timestamp) |
+
+#### daily_usage_records
+
+| 컬럼명 | 타입 | 제약조건 | 설명 |
+|--------|------|----------|------|
+| date | String | PRIMARY KEY | 날짜 (YYYY-MM-DD 형식, 사용자 지정 시간 기준) |
+| standardTicketUsedCount | Int | NOT NULL, DEFAULT 0 | 스탠다드 티켓 일일 사용 횟수 |
+
+#### app_groups
+
+| 컬럼명 | 타입 | 제약조건 | 설명 |
+|--------|------|----------|------|
+| packageName | String | PRIMARY KEY | 앱 패키지명 |
+| groupType | AppGroupType | PRIMARY KEY | 그룹 타입 (SNS, OTT) |
+| isIncluded | Boolean | NOT NULL, DEFAULT true | 포함 여부 (true: 포함, false: 제외) |
 
 ---
 
@@ -63,9 +108,10 @@ erDiagram
 
 **파일**: [`app/src/main/java/com/faust/data/database/FaustDatabase.kt`](app/src/main/java/com/faust/data/database/FaustDatabase.kt)
 
-- **엔티티**: `BlockedApp`, `PointTransaction`
-- **DAO**: `AppBlockDao`, `PointTransactionDao`
-- **버전**: 1
+- **엔티티**: `BlockedApp`, `PointTransaction`, `FreePassItem`, `DailyUsageRecord`, `AppGroup`
+- **DAO**: `AppBlockDao`, `PointTransactionDao`, `FreePassItemDao`, `DailyUsageRecordDao`, `AppGroupDao`
+- **버전**: 2
+- **Migration**: 버전 1 → 2 Migration 스크립트 포함
 - **포인트 관리**: 
   - 현재 포인트는 `PointTransaction`의 `SUM(amount)`로 계산
   - `PointTransactionDao.getTotalPointsFlow()`로 Flow 제공
@@ -88,6 +134,35 @@ erDiagram
   - `getAllBlockedApps()`: 모든 차단 앱 목록 Flow
   - `insertBlockedApp()`: 차단 앱 추가
   - `deleteBlockedApp()`: 차단 앱 제거
+
+### 4. FreePassItemDao
+
+**파일**: [`app/src/main/java/com/faust/data/database/FreePassItemDao.kt`](app/src/main/java/com/faust/data/database/FreePassItemDao.kt)
+
+- **주요 메서드**:
+  - `getAllItems()`: 모든 프리 패스 아이템 Flow
+  - `getItem(itemType)`: 특정 타입의 아이템 조회 (suspend)
+  - `getItemFlow(itemType)`: 특정 타입의 아이템 Flow
+  - `insertOrUpdateItem()`: 아이템 삽입 또는 업데이트
+
+### 5. DailyUsageRecordDao
+
+**파일**: [`app/src/main/java/com/faust/data/database/DailyUsageRecordDao.kt`](app/src/main/java/com/faust/data/database/DailyUsageRecordDao.kt)
+
+- **주요 메서드**:
+  - `getAllRecords()`: 모든 일일 사용 기록 Flow
+  - `getTodayRecord(date)`: 특정 날짜의 기록 조회 (사용자 지정 시간 기준)
+  - `insertOrUpdateRecord()`: 기록 삽입 또는 업데이트
+
+### 6. AppGroupDao
+
+**파일**: [`app/src/main/java/com/faust/data/database/AppGroupDao.kt`](app/src/main/java/com/faust/data/database/AppGroupDao.kt)
+
+- **주요 메서드**:
+  - `getAllGroups()`: 모든 앱 그룹 Flow
+  - `getGroupsByType(groupType)`: 특정 그룹 타입의 모든 앱 Flow
+  - `isAppInGroup(packageName, groupType)`: 앱이 특정 그룹에 속하는지 확인
+  - `insertOrUpdateGroup()`: 앱 그룹 삽입 또는 업데이트
 
 ---
 
@@ -123,6 +198,9 @@ erDiagram
 | is_service_running | Boolean | false | 서비스 실행 상태 |
 | persona_type | String | "" | 페르소나 타입 (STREET, CALM, DIPLOMATIC, COMFORTABLE) |
 | wasAudioBlockedOnScreenOff | Boolean | false | 화면 OFF 시 차단 앱 오디오 재생 상태 |
+| custom_daily_reset_time | String | "00:00" | 사용자 지정 일일 리셋 시간 (HH:mm 형식) |
+| active_pass_item_type | String | null | 활성 패스 아이템 타입 |
+| active_pass_start_time | Long | 0 | 활성 패스 시작 시간 (timestamp) |
 
 ### 보안 특징
 

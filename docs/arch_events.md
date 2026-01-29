@@ -265,6 +265,129 @@ sequenceDiagram
     WeeklyResetService->>AlarmManager: 다음 주 정산 스케줄링
 ```
 
+### 6. 일일 초기화 플로우 (사용자 지정 시간 기준)
+
+```mermaid
+sequenceDiagram
+    participant AlarmManager
+    participant DailyResetReceiver
+    participant DailyResetService
+    participant PreferenceManager
+    participant TimeUtils
+    participant Database
+
+    AlarmManager->>DailyResetReceiver: 사용자 지정 시간 트리거
+    DailyResetReceiver->>DailyResetService: 정산 실행
+    
+    DailyResetService->>PreferenceManager: 사용자 지정 시간 조회
+    PreferenceManager-->>DailyResetService: customTime (예: "02:00")
+    
+    DailyResetService->>TimeUtils: 오늘 날짜 계산 (getDayString)
+    TimeUtils-->>DailyResetService: today (예: "2026-01-20")
+    
+    DailyResetService->>Database: 트랜잭션 시작
+    DailyResetService->>Database: 오늘 날짜의 기록 조회
+    
+    alt 기록이 있는 경우
+        Database-->>DailyResetService: todayRecord
+        DailyResetService->>Database: standardTicketUsedCount = 0으로 업데이트
+    else 기록이 없는 경우
+        DailyResetService->>Database: 새 기록 생성 (standardTicketUsedCount = 0)
+    end
+    
+    DailyResetService->>Database: 트랜잭션 커밋
+    
+    DailyResetService->>AlarmManager: 다음 일일 초기화 스케줄링
+```
+
+### 7. 프리 패스 구매/사용 플로우
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant ShopFragment
+    participant ShopViewModel
+    participant FreePassService
+    participant ActivePassService
+    participant Database
+    participant PreferenceManager
+    participant AppBlockingService
+
+    User->>ShopFragment: 아이템 구매 버튼 클릭
+    ShopFragment->>ShopViewModel: purchaseItem(itemType)
+    
+    ShopViewModel->>FreePassService: purchaseItem(itemType)
+    
+    FreePassService->>FreePassService: 구매 가능 여부 확인
+    alt 구매 가능
+        FreePassService->>Database: 트랜잭션 시작
+        FreePassService->>Database: 현재 포인트 조회
+        FreePassService->>Database: 포인트 차감 (TransactionType.PURCHASE)
+        FreePassService->>PreferenceManager: 포인트 동기화
+        FreePassService->>Database: 아이템 업데이트
+        FreePassService->>Database: 트랜잭션 커밋
+        
+        alt 도파민 샷인 경우
+            FreePassService-->>ShopViewModel: PurchaseResult.Success
+            ShopViewModel->>ActivePassService: activatePass(itemType)
+            ActivePassService->>PreferenceManager: 활성 패스 정보 저장
+            ActivePassService->>WorkManager: 만료 시간 스케줄링
+        else 다른 아이템인 경우
+            FreePassService-->>ShopViewModel: PurchaseResult.Success
+        end
+    else 구매 불가
+        FreePassService-->>ShopViewModel: PurchaseResult.Failure
+    end
+    
+    ShopViewModel-->>ShopFragment: 구매 결과 표시
+    
+    alt 아이템 사용 (스탠다드 티켓/시네마 패스)
+        User->>ShopFragment: 사용 버튼 클릭
+        ShopFragment->>ShopViewModel: useItem(itemType)
+        
+        ShopViewModel->>FreePassService: useItem(itemType)
+        FreePassService->>Database: 아이템 사용 처리
+        FreePassService-->>ShopViewModel: UseResult.Success
+        
+        ShopViewModel->>ActivePassService: activatePass(itemType)
+        ActivePassService->>PreferenceManager: 활성 패스 정보 저장
+        ActivePassService->>WorkManager: 만료 시간 스케줄링
+    end
+    
+    Note over AppBlockingService: 차단 앱 실행 시
+    AppBlockingService->>ActivePassService: 활성 패스 확인
+    ActivePassService-->>AppBlockingService: 활성 패스 정보
+    alt 활성 패스가 있고 해당 앱이 허용 그룹에 속함
+        AppBlockingService->>AppBlockingService: 차단 해제 (오버레이 표시 안 함)
+    end
+```
+
+### 8. 사용자 지정 시간 변경 이벤트
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant SettingsFragment
+    participant PreferenceManager
+    participant DailyResetService
+    participant AlarmManager
+
+    User->>SettingsFragment: 시간 선택 버튼 클릭
+    SettingsFragment->>SettingsFragment: TimePickerDialog 표시
+    User->>SettingsFragment: 시간 선택 (예: 02:00)
+    
+    SettingsFragment->>PreferenceManager: setCustomDailyResetTime("02:00")
+    PreferenceManager->>PreferenceManager: 시간 형식 검증 (TimeUtils.parseTimeString)
+    PreferenceManager->>PreferenceManager: 저장
+    
+    SettingsFragment->>DailyResetService: scheduleDailyReset()
+    DailyResetService->>PreferenceManager: getCustomDailyResetTime()
+    PreferenceManager-->>DailyResetService: "02:00"
+    
+    DailyResetService->>DailyResetService: getNextResetTime("02:00")
+    DailyResetService->>AlarmManager: 다음 리셋 시간 알람 등록
+```
+
 ---
 
 ## 핵심 이벤트 정의 (Core Event Definitions)
@@ -281,11 +404,14 @@ sequenceDiagram
 
 **처리 로직**:
 - `event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED` 확인
+- **필터링 1: IGNORED_PACKAGES 체크**: 시스템 UI 패키지 무시
+- **필터링 1.5: 오버레이 패키지의 FrameLayout 이벤트 필터링**: `com.faust` 패키지의 FrameLayout 이벤트 무시 (오버레이가 표시된 후 불필요한 이벤트 발생 방지)
 - **Window ID 검사**: `event.windowId`로 실제 창 전환만 감지
   - Window ID가 유효한 경우: 같은 창이면 무시 (화면 내부 변화 제외)
   - Window ID가 -1(UNDEFINED)인 경우: 오버레이 상태 확인하여 IDLE 상태면 처리 허용
 - **클래스 이름 검증**: Layout은 항상 허용
   - Activity/Dialog/Fragment/Layout 모두 허용 (FrameLayout, LinearLayout 등 포함)
+  - 단, 오버레이 패키지(`com.faust`)의 FrameLayout은 사전 필터링됨
   - Window ID 검사와 오버레이 상태 체크로 이미 중복 방지하고 있으므로 더 관대하게 처리
 - **코루틴 Throttling**: 300ms 지연으로 연속 이벤트를 마지막 것만 처리
 - `event.packageName`에서 패키지명 추출
@@ -306,8 +432,12 @@ sequenceDiagram
 - 메모리 캐시(`blockedAppsCache`)에서 차단 여부 확인
 - 차단된 앱인 경우:
   - **Grace Period 우선 체크**: `lastAllowedPackage`가 설정되어 있고 현재 패키지와 일치하면 오버레이 표시 차단 (중복 징벌 방지)
+  - **프리 패스 활성화 체크**: 활성 패스가 있고 해당 앱이 허용 그룹에 속하면 차단 해제 (오버레이 표시 안 함)
+    - SNS 앱: 도파민 샷 활성 여부 확인
+    - OTT 앱: 시네마 패스 활성 여부 확인
+    - SNS 제외 전체 앱: 스탠다드 티켓 활성 여부 확인
   - Cool-down 체크: 같은 앱이 최근에 홈으로 이동했고 쿨다운 시간 내면 오버레이 표시 차단
-  - Grace Period와 Cool-down 체크를 통과한 경우에만 오버레이 표시
+  - Grace Period, 프리 패스, Cool-down 체크를 통과한 경우에만 오버레이 표시
 - 차단되지 않은 앱인 경우: 오버레이 숨김
 
 **관련 컴포넌트**:
@@ -340,6 +470,19 @@ sequenceDiagram
 - **리소스 정리 보장**: 백업한 참조로 `dismiss()` 호출하여 PersonaEngine 오디오 정지 및 WindowManager 뷰 제거 보장
 - **콜백 패턴**: `OverlayDismissCallback`으로 오버레이 닫힘 완료 시점 명확화
 - **쿨다운 면제**: 철회 버튼 클릭 시 `applyCooldown=false`로 쿨다운 면제하여 의도적 재실행 허용
+  - 쿨다운 변수(`lastHomeNavigationPackage`, `lastHomeNavigationTime`)를 명시적으로 리셋하여 재실행 시 오버레이 표시 보장
+  - 스레드 안전성을 위해 `@Volatile` 어노테이션 적용
+- **상태 변경 기반 오버레이 표시**: `transitionToState()`에서 `isStateChanged=false`인 경우 오버레이 표시하지 않음
+  - `hideOverlay()` 직후 같은 상태로 재전이되는 경우 중복 표시 방지
+  - `isStateChanged=true && previousState=ALLOWED`인 경우만 오버레이 표시 (실제 상태 전이 발생 시에만)
+- **스레드 안전성**: 모든 공유 변수에 `@Volatile` 어노테이션 적용
+  - `currentOverlay`, `overlayState`: 오버레이 상태 관리
+  - `lastWindowId`, `lastProcessedPackage`: Window ID 기반 중복 호출 방지
+  - `lastAllowedPackage`: Grace Period 체크
+  - `currentBlockedPackage`, `currentBlockedAppName`: 현재 협상 중인 앱 정보
+  - `latestActivePackage`: 현재 활성 앱 추적
+  - `lastHomeNavigationPackage`, `lastHomeNavigationTime`: 쿨다운 메커니즘
+  - 여러 스레드(`onAccessibilityEvent` 메인 스레드, `collectLatest` Default 스레드, `hideOverlay`/`showOverlay` Main 스레드)에서 접근하므로 가시성 보장 필수
 - **체크 순서 최적화**: `handleAppLaunch()`에서 오버레이 상태 → Grace Period → Cool-down 순서로 체크
 - **예외 처리 강화**: try-catch-finally로 상태 머신 데드락 방지 (항상 IDLE로 복귀)
 
@@ -376,7 +519,8 @@ sequenceDiagram
 **처리 로직**:
 - `PenaltyService.applyQuitPenalty(packageName, appName)` 호출
 - Free/Standard 티어: 3 WP 차감
-- `AppBlockingService.hideOverlay(shouldGoHome = true)` 호출하여 오버레이 닫기 및 홈으로 이동
+- `AppBlockingService.hideOverlay(shouldGoHome = true, applyCooldown = false)` 호출하여 오버레이 닫기 및 홈으로 이동
+  - `applyCooldown=false`로 쿨다운 면제 및 쿨다운 변수 리셋
 - **홈 런처 감지**: `handleAppLaunch()`에서 홈 런처 패키지가 감지되면 상태를 `ALLOWED`로 전이
   - 서비스 시작 시 `initializeHomeLauncherPackages()`로 홈 런처 패키지 목록 초기화
   - `PackageManager.queryIntentActivities()`로 `CATEGORY_HOME` Intent를 처리할 수 있는 모든 앱을 찾아 저장
@@ -602,6 +746,79 @@ sequenceDiagram
 - `AppBlockDao`: 차단 앱 목록 제공 (Flow)
 - `blockedAppsCache`: 메모리 캐시 (HashSet)
 
+### D. 프리 패스 이벤트 (Free Pass Events)
+
+#### 1. purchaseItem (아이템 구매)
+
+**위치**: [`ShopViewModel.purchaseItem()`](app/src/main/java/com/faust/presentation/viewmodel/ShopViewModel.kt) → [`FreePassService.purchaseItem()`](app/src/main/java/com/faust/domain/FreePassService.kt)
+
+**발생 조건**: 사용자가 ShopFragment에서 아이템 구매 버튼을 클릭할 때 발생합니다.
+
+**처리 로직**:
+- 구매 가능 여부 확인: 잔액, 인벤토리 한도, 재구매 쿨타임 확인
+- 가격 계산: 스탠다드 티켓은 누진 가격 적용
+- 트랜잭션으로 포인트 차감 및 아이템 업데이트
+- 도파민 샷은 구매 시 즉시 활성화 (lastUseTime 설정)
+
+**관련 컴포넌트**:
+- `ShopFragment`: 사용자 인터랙션 처리
+- `ShopViewModel`: 구매 로직 호출
+- `FreePassService`: 구매 검증 및 처리
+- `ActivePassService`: 활성 패스 활성화 (도파민 샷)
+
+#### 2. useItem (아이템 사용)
+
+**위치**: [`ShopViewModel.useItem()`](app/src/main/java/com/faust/presentation/viewmodel/ShopViewModel.kt) → [`FreePassService.useItem()`](app/src/main/java/com/faust/domain/FreePassService.kt)
+
+**발생 조건**: 사용자가 ShopFragment에서 아이템 사용 버튼을 클릭할 때 발생합니다.
+
+**처리 로직**:
+- 아이템 보유 여부 확인
+- 하이브리드 쿨타임 확인 (스탠다드 티켓만)
+- 아이템 사용 처리 (수량 감소, 사용 시간 기록)
+- 일일 사용 횟수 업데이트 (스탠다드 티켓만)
+- 활성 패스 활성화
+
+**관련 컴포넌트**:
+- `ShopFragment`: 사용자 인터랙션 처리
+- `ShopViewModel`: 사용 로직 호출
+- `FreePassService`: 사용 검증 및 처리
+- `ActivePassService`: 활성 패스 활성화
+
+#### 3. DAILY_RESET (일일 초기화)
+
+**위치**: [`DailyResetReceiver.onReceive()`](app/src/main/java/com/faust/domain/DailyResetService.kt) → [`DailyResetService.performReset()`](app/src/main/java/com/faust/domain/DailyResetService.kt)
+
+**발생 조건**: AlarmManager에 의해 매일 사용자 지정 시간에 발생합니다.
+
+**처리 로직**:
+- 사용자 지정 시간 기준 오늘 날짜 계산 (`TimeUtils.getDayString()`)
+- 오늘 날짜의 일일 사용 기록 조회
+- 스탠다드 티켓 일일 사용 횟수를 0으로 초기화
+- 다음 일일 초기화 스케줄링
+
+**관련 컴포넌트**:
+- `DailyResetReceiver`: 브로드캐스트 수신
+- `DailyResetService`: 일일 초기화 로직 실행
+- `TimeUtils`: 사용자 지정 시간 기준 날짜 계산
+- `PreferenceManager`: 사용자 지정 시간 조회
+
+#### 4. PassExpirationWorker (패스 만료)
+
+**위치**: [`PassExpirationWorker.doWork()`](app/src/main/java/com/faust/domain/ActivePassService.kt)
+
+**발생 조건**: WorkManager에 의해 활성 패스 만료 시간에 발생합니다.
+
+**처리 로직**:
+- 활성 패스 해제
+- PreferenceManager에서 활성 패스 정보 제거
+- WorkManager 작업 취소
+
+**관련 컴포넌트**:
+- `WorkManager`: 백그라운드 작업 스케줄링
+- `PassExpirationWorker`: 패스 만료 처리
+- `ActivePassService`: 활성 패스 해제
+
 ---
 
 ## 상태 전이 모델 (State Transition Model)
@@ -617,7 +834,7 @@ sequenceDiagram
 
 ### 핵심 원칙
 
-1. **오버레이 실행 조건**: 시스템이 'ALLOWED' 상태에서 'BLOCKED' 상태로 변경되는 시점에만 단 1회 실행합니다. 이미 'BLOCKED' 상태인 경우(예: 화면을 다시 켰을 때)에는 오버레이를 다시 띄우지 않습니다.
+1. **오버레이 실행 조건**: 시스템이 'ALLOWED' 상태에서 'BLOCKED' 상태로 변경되는 시점에 오버레이를 실행합니다. 이미 'BLOCKED' 상태인 경우에도 오버레이가 표시되지 않은 상태이고 조건을 만족하면 오버레이를 표시합니다. (예: 오디오 종료 후 차단 앱 재실행 시)
 
 2. **이벤트 기반 오디오 감지**: `AudioManager.AudioPlaybackCallback`을 사용하여 오디오 상태 변화를 감지합니다. 고정된 주기적 검사 대신, 오디오 세션의 시작/종료 이벤트가 발생할 때만 상태를 업데이트합니다.
 
@@ -683,6 +900,32 @@ ALLOWED → BLOCKED 전이
 유죄협상 오버레이 정상 작동 ✅
 ```
 
+#### 오디오 종료 후 차단 앱 재실행 시나리오
+
+```
+차단 앱 실행 → 오버레이 표시 → 철회 버튼 클릭
+  ↓
+상태: BLOCKED 유지 (홈 이동)
+  ↓
+오디오 재생 시작
+  ↓
+BLOCKED → BLOCKED (상태 변경 없음, 오디오로 인한 차단)
+  ↓
+오디오 종료
+  ↓
+BLOCKED → ALLOWED 전이
+  ↓
+채굴 재개
+  ↓
+같은 차단 앱 재실행
+  ↓
+ALLOWED → BLOCKED 전이 또는 BLOCKED → BLOCKED (오버레이 없음)
+  ↓
+오버레이 표시 조건 충족 (triggerOverlay=true, currentOverlay=null)
+  ↓
+유죄협상 오버레이 정상 작동 ✅
+```
+
 #### 화면 OFF 시 차단 앱 오디오 재생 기록 시나리오
 
 ```
@@ -710,6 +953,7 @@ checkBlockedAppAudioFromConfigs()에서 플래그 리셋
 - **상태 정의**: [`AppBlockingService.MiningState`](app/src/main/java/com/faust/services/AppBlockingService.kt)
 - **상태 전이 로직**: [`AppBlockingService.transitionToState()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
   - ALLOWED 전이 시 `PreferenceManager.wasAudioBlockedOnScreenOff()` 확인하여 조건부 재개
+  - BLOCKED 전이 시 상태 변경 여부와 관계없이 오버레이가 없고 조건을 만족하면 오버레이 표시 (오디오 종료 후 차단 앱 재실행 시나리오 대응)
 - **오디오 상태 변경 처리**: [`AppBlockingService.onAudioBlockStateChanged()`](app/src/main/java/com/faust/services/AppBlockingService.kt)
 - **콜백 등록**: [`PointMiningService.setBlockingServiceCallback()`](app/src/main/java/com/faust/services/PointMiningService.kt)
 - **화면 OFF 시 오디오 상태 기록**: [`AppBlockingService.registerScreenOffReceiver()`](app/src/main/java/com/faust/services/AppBlockingService.kt)

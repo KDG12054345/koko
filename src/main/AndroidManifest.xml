@@ -78,6 +78,17 @@
             </intent-filter>
         </receiver>
 
+        <!-- 일일 초기화 리시버 -->
+        <receiver
+            android:name=".domain.DailyResetReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="com.faust.DAILY_RESET" />
+            </intent-filter>
+        </receiver>
+
     </application>
 
 </manifest>

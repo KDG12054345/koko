@@ -42,6 +42,88 @@ Domain Layer는 비즈니스 로직과 규칙을 담당합니다. Persona Module
   - 트랜잭션 내부 예외 처리 및 로깅
   - 실패 시 자동 롤백 및 재시도 스케줄링
 
+### 3. DailyResetService
+
+**파일**: [`app/src/main/java/com/faust/domain/DailyResetService.kt`](app/src/main/java/com/faust/domain/DailyResetService.kt)
+
+- **책임**: 일일 초기화 로직 (스탠다드 티켓 일일 사용 횟수 초기화)
+- **스케줄링**: `AlarmManager`로 매일 사용자 지정 시간에 실행 (기본값: 00:00)
+- **사용자 지정 시간 지원**:
+  - `PreferenceManager.getCustomDailyResetTime()`으로 사용자 지정 시간 조회
+  - `TimeUtils.getNextResetTime(customTime)`으로 다음 리셋 시간 계산
+  - 시간 변경 시 알람 재스케줄링
+- **데이터 정합성**:
+  - `database.withTransaction`으로 일일 사용 기록 초기화를 원자적으로 처리
+  - 사용자 지정 시간 기준으로 날짜 계산 (`TimeUtils.getDayString()`)
+- **에러 처리**:
+  - 트랜잭션 내부 예외 처리 및 로깅
+  - 실패 시 자동 롤백
+
+### 4. FreePassService
+
+**파일**: [`app/src/main/java/com/faust/domain/FreePassService.kt`](app/src/main/java/com/faust/domain/FreePassService.kt)
+
+- **책임**: 프리 패스 구매 및 사용 로직
+- **주요 기능**:
+  - 구매 검증: 잔액, 인벤토리 한도, 재구매 쿨타임 확인
+  - 구매 처리: 포인트 차감 (TransactionType.PURCHASE), 아이템 추가, 쿨타임 기록
+  - 사용 처리: 아이템 소모, 사용 시간 기록, 하이브리드 쿨타임 적용
+  - 누진 가격 계산: 스탠다드 티켓 보유 수량에 따른 가격 계산
+- **아이템별 상세 정보**:
+  - **도파민 샷 (DOPAMINE_SHOT)**:
+    - 가격: 15 WP (고정)
+    - 재구매 쿨타임: 30분
+    - 인벤토리: 없음 (구매 시 즉시 사용)
+    - 효과: SNS 앱 그룹 차단 해제
+  - **스탠다드 티켓 (STANDARD_TICKET)**:
+    - 가격: 20 WP (기본) + 보유 수량당 10 WP 누진 (최대 3장)
+    - 재구매 쿨타임: 없음
+    - 하이브리드 쿨타임: 일일 3회 사용까지 쿨타임 없음, 4회부터 1시간 쿨타임
+    - 인벤토리: 최대 3장 보관 가능
+    - 효과: 전체 앱 차단 해제 (SNS 앱 제외)
+  - **시네마 패스 (CINEMA_PASS)**:
+    - 가격: 75 WP (고정)
+    - 재구매 쿨타임: 18시간
+    - 인벤토리: 최대 1장 보관 가능
+    - 효과: OTT 앱 그룹 차단 해제
+- **데이터 정합성**:
+  - `database.withTransaction`으로 포인트 차감과 아이템 업데이트를 원자적으로 처리
+  - DB에서 현재 포인트 계산 (`PointTransactionDao.getTotalPoints()`)
+  - PreferenceManager는 호환성을 위해 동기화만 수행
+- **에러 처리**:
+  - 트랜잭션 내부 예외 처리 및 로깅
+  - 실패 시 자동 롤백
+
+### 5. AppGroupService
+
+**파일**: [`app/src/main/java/com/faust/domain/AppGroupService.kt`](app/src/main/java/com/faust/domain/AppGroupService.kt)
+
+- **책임**: 앱 그룹 관리 (SNS/OTT 앱 분류)
+- **주요 기능**:
+  - SNS 앱 그룹: `CATEGORY_SOCIAL` + 특정 패키지명 추가/제외
+  - OTT 앱 그룹: `CATEGORY_VIDEO` + 특정 패키지명 추가/제외
+  - 앱이 특정 그룹에 속하는지 확인 (카테고리 기반 + 명시적 포함/제외)
+  - 초기 데이터 설정 (주요 SNS/OTT 앱 패키지명)
+- **초기화 타이밍**: 앱 첫 실행 시 또는 AppGroupService 초기화 시 자동 설정 (데이터가 없을 때만)
+
+### 6. ActivePassService
+
+**파일**: [`app/src/main/java/com/faust/domain/ActivePassService.kt`](app/src/main/java/com/faust/domain/ActivePassService.kt)
+
+- **책임**: 활성 프리 패스 추적 및 타이머 관리
+- **주요 기능**:
+  - 현재 활성화된 프리 패스 추적
+  - 타이머 관리 및 만료 시 자동 해제
+  - 그룹별 활성 패스 확인 (SNS/OTT/전체)
+- **아이템별 지속 시간**:
+  - **도파민 샷**: 20분
+  - **스탠다드 티켓**: 1시간
+  - **시네마 패스**: 4시간
+- **타이머 관리 방식**:
+  - WorkManager를 사용하여 앱이 종료되어도 타이머가 동작
+  - `PassExpirationWorker`로 만료 시간 처리
+  - PreferenceManager에 활성 패스 정보 저장 (앱 재시작 시에도 상태 유지)
+
 ---
 
 ## Persona Module

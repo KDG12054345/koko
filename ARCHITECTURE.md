@@ -81,13 +81,17 @@ com.faust/
 ├── 📱 Presentation Layer
 │   └── presentation/
 │       ├── view/
-│       │   ├── MainActivity.kt                    # 메인 액티비티
+│       │   ├── MainActivity.kt                    # 메인 액티비티 (ViewPager2로 Fragment 통합)
+│       │   ├── MainFragment.kt                    # 메인 Fragment (차단 앱 목록)
+│       │   ├── ShopFragment.kt                    # 상점 Fragment (프리 패스 구매/사용)
+│       │   ├── SettingsFragment.kt                # 설정 Fragment (사용자 지정 리셋 시간)
 │       │   ├── GuiltyNegotiationOverlay.kt        # 유죄 협상 오버레이
 │       │   ├── BlockedAppAdapter.kt                # 차단 앱 리스트 어댑터
 │       │   ├── AppSelectionDialog.kt              # 앱 선택 다이얼로그
 │       │   └── PersonaSelectionDialog.kt           # 페르소나 선택 다이얼로그
 │       └── viewmodel/
-│           └── MainViewModel.kt                  # 메인 ViewModel (MVVM)
+│           ├── MainViewModel.kt                  # 메인 ViewModel (MVVM)
+│           └── ShopViewModel.kt                  # 상점 ViewModel (MVVM)
 │
 ├── ⚙️ Service Layer
 │   └── services/
@@ -98,6 +102,10 @@ com.faust/
 │   └── domain/
 │       ├── PenaltyService.kt                      # 페널티 계산 및 적용
 │       ├── WeeklyResetService.kt                 # 주간 정산 로직
+│       ├── DailyResetService.kt                  # 일일 초기화 로직 (사용자 지정 시간 지원)
+│       ├── FreePassService.kt                   # 프리 패스 구매 및 사용 로직
+│       ├── AppGroupService.kt                    # 앱 그룹 관리 (SNS/OTT)
+│       ├── ActivePassService.kt                 # 활성 패스 추적 및 타이머 관리
 │       └── persona/                               # Persona Module (신규)
 │           ├── PersonaType.kt                    # 페르소나 타입 Enum
 │           ├── PersonaProfile.kt                  # 페르소나 프로필 데이터
@@ -112,19 +120,27 @@ com.faust/
 ├── 💾 Data Layer
 │   └── data/
 │       ├── database/
-│       │   ├── FaustDatabase.kt                  # Room 데이터베이스
+│       │   ├── FaustDatabase.kt                  # Room 데이터베이스 (버전 2)
 │       │   ├── AppBlockDao.kt                     # 차단 앱 DAO
-│       │   └── PointTransactionDao.kt             # 포인트 거래 DAO
+│       │   ├── PointTransactionDao.kt             # 포인트 거래 DAO
+│       │   ├── FreePassItemDao.kt                 # 프리 패스 아이템 DAO
+│       │   ├── DailyUsageRecordDao.kt            # 일일 사용 기록 DAO
+│       │   └── AppGroupDao.kt                     # 앱 그룹 DAO
 │       │
 │       └── utils/
 │           ├── PreferenceManager.kt               # EncryptedSharedPreferences 관리
-│           └── TimeUtils.kt                       # 시간 계산 유틸리티
+│           └── TimeUtils.kt                       # 시간 계산 유틸리티 (사용자 지정 시간 지원)
 │
 ├── 📦 Models
 │   └── models/
 │       ├── BlockedApp.kt                          # 차단 앱 엔티티
 │       ├── PointTransaction.kt                    # 포인트 거래 엔티티
-│       └── UserTier.kt                            # 사용자 티어 enum
+│       ├── UserTier.kt                            # 사용자 티어 enum
+│       ├── FreePassItem.kt                        # 프리 패스 아이템 엔티티
+│       ├── FreePassItemType.kt                   # 프리 패스 아이템 타입 enum
+│       ├── DailyUsageRecord.kt                   # 일일 사용 기록 엔티티
+│       ├── AppGroup.kt                           # 앱 그룹 엔티티
+│       └── AppGroupType.kt                       # 앱 그룹 타입 enum
 │
 └── 🚀 Application
     └── FaustApplication.kt                        # Application 클래스
@@ -139,8 +155,12 @@ com.faust/
 **책임**: UI 컴포넌트 및 사용자 인터랙션 처리
 
 **주요 컴포넌트**:
-- `MainActivity`: 메인 UI 표시 및 권한 요청
+- `MainActivity`: ViewPager2로 Fragment 통합 (MainFragment, ShopFragment, SettingsFragment)
+- `MainFragment`: 차단 앱 목록 및 포인트 표시
+- `ShopFragment`: 프리 패스 아이템 구매 및 사용 UI
+- `SettingsFragment`: 사용자 지정 일일 리셋 시간 설정
 - `MainViewModel`: 데이터 관찰 및 비즈니스 로직 (MVVM)
+- `ShopViewModel`: 상점 데이터 관찰 및 구매/사용 로직 (MVVM)
 - `GuiltyNegotiationOverlay`: 시스템 오버레이로 유죄 협상 화면 표시
 - `PersonaSelectionDialog`: 페르소나 선택 및 등록 해제 다이얼로그
 
@@ -148,6 +168,7 @@ com.faust/
 - StateFlow를 통한 반응형 UI 업데이트
 - 데이터베이스 직접 접근 제거로 경량화
 - Persona Module 통합: 능동적 계약 방식 (사용자 입력 검증)
+- ViewPager2를 통한 탭 기반 네비게이션
 
 → [상세 문서 보기](./docs/arch_presentation.md)
 
@@ -160,6 +181,10 @@ com.faust/
 **주요 컴포넌트**:
 - `PenaltyService`: 페널티 계산 및 적용
 - `WeeklyResetService`: 주간 정산 로직
+- `DailyResetService`: 일일 초기화 로직 (사용자 지정 시간 지원)
+- `FreePassService`: 프리 패스 구매 및 사용 로직 (누진 가격, 쿨타임 관리)
+- `AppGroupService`: 앱 그룹 관리 (SNS/OTT 앱 분류)
+- `ActivePassService`: 활성 패스 추적 및 타이머 관리 (WorkManager 사용, 지속 시간: 도파민 샷 20분, 스탠다드 티켓 1시간, 시네마 패스 4시간)
 - `PersonaEngine`: 피드백 조율 엔진 (Safety Net 로직 포함)
 - `PersonaProvider`: 페르소나 프로필 제공 (랜덤 텍스트 지원)
 - `VisualHandler`, `HapticHandler`, `AudioHandler`: 각 피드백 실행
@@ -168,6 +193,8 @@ com.faust/
 - 기기 상태 기반 피드백 모드 자동 조정 (Safety Net)
 - 능동적 계약 방식: 사용자가 정확히 문구를 입력해야 강행 버튼 활성화
 - 페르소나별 맞춤형 피드백 (시각, 촉각, 청각)
+- 사용자 지정 시간 기준 일일 초기화
+- WorkManager를 통한 백그라운드 타이머 관리
 
 → [상세 문서 보기](./docs/arch_domain_persona.md)
 
@@ -178,16 +205,21 @@ com.faust/
 **책임**: 데이터 영속성과 저장소 관리
 
 **주요 컴포넌트**:
-- `FaustDatabase`: Room 데이터베이스 (BlockedApp, PointTransaction 엔티티)
+- `FaustDatabase`: Room 데이터베이스 (버전 2, BlockedApp, PointTransaction, FreePassItem, DailyUsageRecord, AppGroup 엔티티)
 - `PointTransactionDao`: 포인트 거래 DAO (Flow 제공)
 - `AppBlockDao`: 차단 앱 DAO
+- `FreePassItemDao`: 프리 패스 아이템 DAO (Flow 제공)
+- `DailyUsageRecordDao`: 일일 사용 기록 DAO (Flow 제공)
+- `AppGroupDao`: 앱 그룹 DAO (Flow 제공)
 - `PreferenceManager`: EncryptedSharedPreferences 관리 (AES256-GCM 암호화)
+- `TimeUtils`: 시간 계산 유틸리티 (사용자 지정 시간 기준 날짜 계산)
 
 **핵심 특징**:
 - 단일 소스 원칙: 포인트는 `PointTransaction`의 `SUM(amount)`로 계산
 - 트랜잭션 보장: 모든 포인트 변경 작업이 원자적으로 처리
 - 보안 강화: EncryptedSharedPreferences로 포인트 조작 방지
 - 반응형 데이터: Flow를 통한 자동 UI 업데이트
+- 사용자 지정 시간 지원: 사용자가 설정한 시간 기준으로 "하루" 정의
 
 → [상세 문서 보기](./docs/arch_data.md)
 
@@ -203,6 +235,8 @@ com.faust/
 - Persona 피드백 플로우
 - 화면 OFF/ON 감지 및 도주 패널티 플로우
 - 주간 정산 플로우
+- 일일 초기화 플로우 (사용자 지정 시간 기준)
+- 프리 패스 구매/사용 플로우
 - 상태 전이 모델 (ALLOWED ↔ BLOCKED)
 
 **핵심 특징**:
@@ -412,7 +446,10 @@ MainActivity
 
 ### 확장 포인트
 - Standard/Faust Pro 티어 로직
-- 상점 시스템
+- **프리 패스 시스템**: 도파민 샷, 스탠다드 티켓, 시네마 패스 구매 및 사용
+  - **도파민 샷**: 15 WP, 재구매 쿨타임 30분, 지속 시간 20분 (SNS 앱 그룹 차단 해제)
+  - **스탠다드 티켓**: 20 WP (기본) + 보유 수량당 10 WP 누진, 재구매 쿨타임 없음, 지속 시간 1시간 (전체 앱 차단 해제, SNS 제외), 하이브리드 쿨타임: 일일 3회 초과 시 1시간
+  - **시네마 패스**: 75 WP, 재구매 쿨타임 18시간, 지속 시간 4시간 (OTT 앱 그룹 차단 해제)
 - **Persona Module 확장**:
   - 새로운 페르소나 타입 추가 (PersonaType Enum 확장)
   - 새로운 핸들러 추가 (인터페이스 구현 후 PersonaEngine에 주입)
@@ -724,6 +761,25 @@ MainActivity
   - 오버레이 닫힘 시 Window ID 기억이 리셋되어 빠른 재실행 시나리오 정상 작동
   - 기존 로직 보존: Window ID 검사, Throttling, 상태 머신 패턴 모두 유지
 
+### [2026-01-XX] 프리 패스 시스템 구현
+- **작업**: 도파민 샷, 스탠다드 티켓, 시네마 패스 구매 및 사용 시스템 구현
+- **컴포넌트 영향**:
+  - 데이터 레이어: FreePassItem, DailyUsageRecord, AppGroup 엔티티 및 DAO 추가
+  - 도메인 레이어: FreePassService, DailyResetService, AppGroupService, ActivePassService 추가
+  - 프레젠테이션 레이어: ShopFragment, SettingsFragment, ShopViewModel 추가
+  - 서비스 레이어: AppBlockingService에 프리 패스 활성화 체크 추가
+- **변경 사항**:
+  - FaustDatabase 버전 1 → 2 업그레이드 (Migration 스크립트 작성)
+  - TimeUtils 확장: 사용자 지정 시간 기준 날짜 계산 유틸리티 추가
+  - PreferenceManager 확장: 사용자 지정 리셋 시간, 활성 패스 정보 저장/조회
+  - MainActivity를 ViewPager2로 변경하여 Fragment 통합 (MainFragment, ShopFragment, SettingsFragment)
+  - AppBlockingService에 프리 패스 활성화 시 차단 해제 로직 추가
+  - WorkManager를 통한 백그라운드 타이머 관리
+- **영향 범위**:
+  - 사용자가 프리 패스를 구매하고 사용하여 일시적으로 앱 차단을 해제할 수 있음
+  - 사용자 지정 시간 기준으로 일일 초기화 수행 (기본값: 00:00)
+  - 기존 로직 보존: Zero-deletion Policy 준수
+
 ### [2026-01-XX] 상태 전이 즉시화로 빠른 재실행 문제 근본 해결
 - **작업**: 오버레이 닫힘 후 빠른 재실행 시 상태 전이 지연과 Throttling 지연의 누적으로 인한 차단 문제 해결
 - **원인 분석**:
@@ -777,6 +833,48 @@ MainActivity
 - **추가 수정 (2026-01-XX)**: 홈 런처에서 다른 앱으로 빠르게 전환하는 경우 불일치 체크 우회
   - **문제**: 홈 이동 후 빠르게 제한 앱 실행 시 `latestActivePackage` 불일치로 이벤트가 무시됨
   - **해결**: 홈 런처에서 다른 앱으로 전환하는 경우는 불일치 체크를 우회하여 제한 앱 이벤트 처리 보장
+- **추가 수정 (2026-01-18)**: 쿨다운 변수 스레드 안전성 및 정합성 개선
+  - **문제**: 철회 버튼 클릭 후 같은 차단 앱 재실행 시 오버레이가 표시되지 않음
+    - 쿨다운 변수(`lastHomeNavigationPackage`, `lastHomeNavigationTime`)가 `@Volatile` 없이 선언되어 스레드 안전성 문제
+    - `applyCooldown=false`일 때 쿨다운 변수가 리셋되지 않아 이전 값이 남아있음
+  - **해결**:
+    - 쿨다운 변수에 `@Volatile` 어노테이션 추가로 스레드 안전성 보장
+    - `navigateToHome()`에서 `applyCooldown=false`일 때 쿨다운 변수를 명시적으로 리셋
+    - 쿨다운 체크 로직에 상세 로그 추가 (경과 시간, 쿨다운 만료 여부)
+  - **영향 범위**:
+    - 철회 버튼 클릭 후 같은 차단 앱 재실행 시 오버레이가 정상적으로 표시됨
+    - 다중 스레드 환경에서 쿨다운 변수 접근 시 가시성 보장
+    - 디버깅 용이성 향상 (상세 로그)
+- **추가 수정 (2026-01-18)**: 오버레이 FrameLayout 이벤트 필터링
+  - **문제**: 오버레이가 표시된 후 FrameLayout 이벤트가 Flow로 전송되어 불필요한 체크 발생
+    - 오버레이의 FrameLayout이 `TYPE_WINDOW_STATE_CHANGED` 이벤트를 발생시켜 Flow로 전송됨
+    - debounce 후 처리 시 `currentOverlay != null`이어서 "오버레이 이미 표시 중" 로그 발생
+  - **해결**:
+    - `onAccessibilityEvent()`에서 오버레이 패키지(`com.faust`)의 FrameLayout 이벤트를 사전 필터링
+    - 필터링 1과 2 사이에 오버레이 패키지 필터링 추가
+  - **영향 범위**:
+    - 오버레이 표시 후 불필요한 이벤트 처리 제거
+    - Flow 처리 부하 감소
+    - 로그 노이즈 감소
+- **추가 수정 (2026-01-18)**: 스레드 안전성 개선 - 공유 변수에 @Volatile 추가
+  - **문제**: 여러 스레드에서 접근하는 공유 변수에 `@Volatile`이 없어 가시성 문제 발생 가능
+    - `onAccessibilityEvent()`는 메인 스레드에서 실행
+    - `hideOverlay()`, `showOverlay()`는 `Dispatchers.Main`에서 실행
+    - `collectLatest`, `handleAppLaunch()`는 `Dispatchers.Default`에서 실행
+    - 엄격 모드 빌드에서 가시성 문제로 인한 중복 호출 가능
+  - **해결**:
+    - 모든 공유 변수에 `@Volatile` 어노테이션 추가
+      - `currentOverlay`: 오버레이 인스턴스 참조
+      - `lastWindowId`, `lastProcessedPackage`: Window ID 기반 중복 호출 방지
+      - `lastAllowedPackage`: Grace Period 체크
+      - `currentBlockedPackage`, `currentBlockedAppName`: 현재 협상 중인 앱 정보
+    - 기존 `@Volatile` 변수와 일관성 유지
+      - `overlayState`, `latestActivePackage`, `lastHomeNavigationPackage`, `lastHomeNavigationTime`
+  - **영향 범위**:
+    - 유죄협상 중복 호출 방지 메커니즘의 정합성 보장
+    - 멀티스레드 환경에서 변수 가시성 보장
+    - 엄격 모드 빌드에서도 안전하게 동작
+    - 경쟁 조건으로 인한 중복 오버레이 표시 방지
 
 ---
 
